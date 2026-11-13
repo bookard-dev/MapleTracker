@@ -113,4 +113,4 @@ Map names, item names, icons, NPC prices and monster drops come from [NiaDB](htt
 
 ## License
 
-[MIT](LICENSE)
+All rights reserved for now: MapleTracker isn't released yet, and the code may not be copied or republished (see [LICENSE](LICENSE)). It will be released under an open license once it's ready. The only official copy is this repository, [bookard-dev/MapleTracker](https://github.com/bookard-dev/MapleTracker).
