@@ -1,0 +1,19 @@
+# Your own data - never published
+tracker_config.json
+tracker_state.json
+tracker_log.txt
+tracker_errors.txt
+profiles/
+
+# Screen recordings used to build the digit templates (they show other players' names and chat)
+captures/
+
+# Downloaded on demand: NiaDB data and item icons (game art)
+meowdb_cache/
+icons/
+
+# Python / scratch
+__pycache__/
+*.pyc
+*.tmp
+*.holdout.npz
