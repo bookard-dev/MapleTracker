@@ -4,6 +4,7 @@ tracker_state.json
 tracker_log.txt
 tracker_errors.txt
 profiles/
+prices.json
 
 # Screen recordings used to build the digit templates (they show other players' names and chat)
 captures/

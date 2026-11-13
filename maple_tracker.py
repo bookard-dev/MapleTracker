@@ -40,6 +40,7 @@ CONFIG_PATH = os.path.join(HERE, "tracker_config.json")
 STATE_PATH = os.path.join(HERE, "tracker_state.json")
 GLYPHS_PATH = os.path.join(HERE, "statusbar_glyphs.npz")
 PROFILES_DIR = os.path.join(HERE, "profiles")             # one file of logs per character
+PRICES_PATH = os.path.join(HERE, "prices.json")           # your item prices, shared by all characters
 
 DEFAULTS = {
     "scan_hz": 7,                   # message-area screenshots per second
@@ -53,7 +54,12 @@ DEFAULTS = {
     "debug": False,                 # print every reading / message to the console
     "hide_from_screenshots": False, # True: leave our windows out of ALL screen capture (yours too:
                                     # Snipping Tool, OBS, Discord), so they can sit on the areas read
-    "trackers": {"exp": True, "meso": True, "potions": True},   # each can be switched off
+    "trackers": {"exp": True, "meso": True, "loot": True, "potions": True},   # each can be switched off
+    # what PROFIT counts (mesos in, potion cost out, plus these kinds of loot)
+    "profit": {"etc": True, "equip": True, "scroll": True, "use": True, "setup": True,
+               "free_potions": True},     # looted potions you also drink offset their cost
+    "niadb_online": False,          # look things up on NiaDB (only with their permission);
+                                    # off: only what's already saved in meowdb_cache/ is used
     "auto_profile": True,           # follow the character name on the status bar
     # the class / name block on the status bar, from the bottom-centre of the game
     "name_text": {"dx0": -322, "dx1": -190, "dy0": 34, "dy1": 3},
@@ -597,7 +603,10 @@ class MessageReader:
                 if pick is None:
                     continue
                 name, qty, cat = pick
-                key = ("item", self.canon(name), qty, cat or "")
+                name = self.canon(name)
+                if not name:
+                    continue                  # OCR junk that matches no real item
+                key = ("item", name, qty, cat or "")
             # a line counts once per kind (mesos / item), once the same reading came up twice
             if key[0] in t["counted"]:
                 continue
@@ -942,8 +951,9 @@ class MeowDB:
     """Polite, cached access to NiaDB. Callers get results through a callback on the Tk thread
     (immediately when cached); a background thread fetches one page at a time, 10 s apart."""
 
-    def __init__(self, app=None):
+    def __init__(self, app=None, online=False):
         self.app = app
+        self.online = online                 # False: only what's already cached, never a request
         os.makedirs(MEOW_DIR, exist_ok=True)
         self.jobs = queue.Queue()
         self.done = queue.Queue()            # (callback, result) for the Tk thread
@@ -972,6 +982,9 @@ class MeowDB:
         hit = self.cached(key, max_age_days)
         if hit is not None:
             callback(hit)
+            return
+        if not self.online:
+            callback(self.cached(key))        # an old copy, or None - nothing is fetched
             return
         stale = self.cached(key)              # an old copy is fine while a new one is fetched
         with self.lock:
@@ -1047,6 +1060,105 @@ class MeowDB:
                 log("NiaDB callback:", repr(ex))
 
 
+# ----------------------------------------------------------------------------- loot: names and prices
+def loot_kind(name, cat):
+    """Which PROFIT switch an item falls under: etc / equip / scroll / use / setup."""
+    if "scroll" in name.lower():
+        return "scroll"
+    return {"Equip": "equip", "Use": "use", "Setup": "setup"}.get(cat or "", "etc")
+
+
+class ItemNames:
+    """Snaps item names read off the screen to the game's real names (NiaDB's item list, saved in
+    meowdb_cache/): exact, then a cut-off name's start ("Animal Fur Bun..."), then OCR slips
+    ("Maple Leat" -> "Maple Leaf"). Unknown names are kept as read."""
+
+    def __init__(self, names=None):
+        self.set_names(names or [])
+        self.memo = {}
+
+    def set_names(self, names):
+        self.names = sorted(set(names))
+        self.lower = {n.lower(): n for n in self.names}
+        self.memo = {}
+
+    def canon(self, raw):
+        if raw in self.memo:
+            return self.memo[raw]
+        out = self._canon(raw)
+        self.memo[raw] = out
+        return out
+
+    def _canon(self, raw):
+        import difflib
+        if not self.names:
+            return raw
+        cut = raw.endswith("...")
+        base = raw[:-3].strip() if cut else raw
+        if base.lower() in self.lower:
+            return self.lower[base.lower()]
+        if cut and len(base) >= 6:
+            starts = [n for n in self.names if n.lower().startswith(base.lower())]
+            if len(starts) == 1:
+                return starts[0]
+            if starts:
+                return raw                    # several items start like this: keep it as read
+        close = difflib.get_close_matches(base, self.names, n=2, cutoff=0.84)
+        if close and (len(close) == 1 or difflib.SequenceMatcher(None, base, close[0]).ratio() >
+                      difflib.SequenceMatcher(None, base, close[1]).ratio() + 0.03):
+            return close[0]
+        return raw
+
+
+class PriceBook:
+    """What each item is worth to you, shared by all characters (prices.json): your own price if
+    you set one, else the NPC sell-back price when known (from NiaDB), else 0 - scrolls default
+    to 1 meso. Each item can also be left out of PROFIT."""
+
+    def __init__(self, path=PRICES_PATH):
+        self.path = path
+        self.items = load_json(path, {})
+
+    def save(self):
+        try:
+            save_json(self.path, self.items)
+        except OSError as ex:
+            log("could not save prices:", ex)
+
+    def entry(self, name, cat=None):
+        e = self.items.get(name)
+        if e is None:
+            e = self.items[name] = {"price": None, "npc": None, "cat": cat, "include": True,
+                                    "seen": time.time()}
+        elif cat and not e.get("cat"):
+            e["cat"] = cat
+        return e
+
+    def seen(self, name, cat):
+        e = self.entry(name, cat)
+        e["seen"] = time.time()
+        return e
+
+    def unit(self, name):
+        """(price per item, where it came from: "you" / "NPC" / "default" / None)."""
+        e = self.items.get(name) or {}
+        if e.get("price") is not None:
+            return e["price"], "you"
+        if e.get("npc") is not None:
+            return e["npc"], "NPC"
+        if loot_kind(name, e.get("cat")) == "scroll":
+            return 1, "default"
+        return 0, None
+
+    def set_price(self, name, price):
+        self.entry(name)["price"] = price
+        self.save()
+
+    def set_include(self, name, on):
+        self.entry(name)["include"] = bool(on)
+        self.save()
+
+
 # ----------------------------------------------------------------------------- sessions / profiles
 STOPPED, RUNNING, PAUSED = "stopped", "running", "paused"
 MIN_LOG_S = 60                 # shorter sessions aren't worth a log entry
@@ -1071,6 +1183,8 @@ class Session:
         self.meso_t = 0.0
         self.pots = {}             # potion name -> {"id", "used", "cost"}
         self.pot_t = 0.0
+        self.loot = {}             # item name -> {"qty", "cat"}
+        self.loot_t = 0.0
 
     @property
     def pot_cost(self):
@@ -1078,6 +1192,15 @@ class Session:
 
     def reset_potions(self):
         self.pots, self.pot_t = {}, 0.0
+
+    def reset_loot(self):
+        self.loot, self.loot_t = {}, 0.0
+
+    def add_loot(self, name, qty, cat):
+        if self.running:
+            e = self.loot.setdefault(name, {"qty": 0, "cat": cat})
+            e["qty"] += qty
+            e["cat"] = e.get("cat") or cat
 
     def reset_exp(self):
         self.exp, self.levels, self.exp_t = 0, 0, 0.0
@@ -1095,6 +1218,7 @@ class Session:
             self.exp_t += dt
             self.meso_t += dt
             self.pot_t += dt
+            self.loot_t += dt
 
     def add_exp(self, gain, levels):
         if self.running:
@@ -1115,7 +1239,8 @@ class Session:
     def loggable(self):
         return bool(self.map.strip()) and self.started is not None and self.active >= MIN_LOG_S
 
-    def log_entry(self, reason, need=None, trackers=None):
+    def log_entry(self, reason, need=None, trackers=None, loot=None):
+        """loot: (value, [item rows]) from the app's price book, or None."""
         on = trackers or {"exp": True, "meso": True, "potions": True}
         exp_h, meso_h = per_hour(self.exp, self.exp_t), per_hour(self.meso, self.meso_t)
         e = {"id": uuid.uuid4().hex[:12], "map": self.map.strip(), "start": self.started,
@@ -1128,13 +1253,16 @@ class Session:
         if on.get("potions"):
             e.update(potions={k: dict(v) for k, v in self.pots.items()}, pot_cost=self.pot_cost,
                      pot_h=per_hour(self.pot_cost, self.pot_t))
-        if on.get("meso") and on.get("potions"):
-            e["profit"] = self.meso - self.pot_cost
-            e["profit_h"] = per_hour(e["profit"], min(self.meso_t, self.pot_t))
+        if on.get("loot") and loot is not None:
+            e.update(loot_value=loot[0], loot=loot[1], loot_h=per_hour(loot[0], self.loot_t))
+        if sum(bool(on.get(k)) for k in ("meso", "loot", "potions")) >= 2:
+            e["profit"] = (self.meso if on.get("meso") else 0) + (e.get("loot_value", 0)) - \
+                (self.pot_cost if on.get("potions") else 0)
+            e["profit_h"] = per_hour(e["profit"], self.active)
         return e
 
     FIELDS = ("state", "map", "started", "active", "exp", "levels", "exp_t", "meso", "pickups", "meso_t",
-              "pots", "pot_t")
+              "pots", "pot_t", "loot", "loot_t")
 
     def to_json(self):
         return {f: getattr(self, f) for f in self.FIELDS}
@@ -1476,7 +1604,13 @@ class Overlay:
                 text_runs(d, x + 2 * k, P(y + 12), [(f"-{s['potcost']}", num, POT_RED), (" [", num, POT_RED),
                                                      (s["poth"], num, WHITE), ("]", num, POT_RED)], st)
             y += 17
-        if on.get("meso") and on.get("potions"):
+        if on.get("loot"):
+            x = text_runs(d, x0, P(y + 13), [("LOOT", lab, WHITE)], st) + 5 * k
+            x = text_runs(d, x, P(y + 13), [(s.get("loot", "0"), num, PROFIT_GREEN), (" [", num, PROFIT_GREEN),
+                                            (s.get("looth", "-/h"), num, WHITE), ("]", num, PROFIT_GREEN)], st)
+            text_runs(d, x + 6 * k, P(y + 13), [(s.get("lootx", ""), small, DIM_TEXT)], st)
+            y += 17
+        if sum(bool(on.get(kk)) for kk in ("meso", "loot", "potions")) >= 2:
             col = PROFIT_GREEN if s.get("profit_v", 0) >= 0 else PROFIT_RED
             x = text_runs(d, x0, P(y + 13), [("PROFIT", lab, WHITE)], st) + 5 * k
             text_runs(d, x, P(y + 13), [(s["profit"], num, col), (" [", num, col), (s["profith"], num, WHITE),
@@ -1838,13 +1972,143 @@ def profit_text(v):
     return ("+" if v >= 0 else "-") + fmt_int(abs(v))
 
 
+class MapSuggest:
+    """The drop-down under the MAP box: maps whose name (or street / area) matches what's typed,
+    from NiaDB's map list (saved in meowdb_cache/), towns left out, your recent maps first.
+    Up / Down to choose, Enter or a click to pick, Esc to close. Anything typed still works as a
+    map name even when it isn't in the list."""
+    ROWS = 8
+
+    def __init__(self, owner, entry, var):
+        self.owner, self.entry, self.var = owner, entry, var
+        self.top = None
+        self.matches = []
+        self.picking = False
+        entry.bind("<KeyRelease>", self._typed, add="+")
+        entry.bind("<Down>", lambda e: self._move(1))
+        entry.bind("<Up>", lambda e: self._move(-1))
+        entry.bind("<Return>", self._enter, add="+")
+        entry.bind("<Escape>", lambda e: self.close() or "break")
+        entry.bind("<FocusOut>", lambda e: entry.after(200, self._focus_left))
+
+    def _focus_left(self):
+        try:
+            f = self.entry.focus_get()
+        except (tk.TclError, KeyError):
+            f = None
+        if self.top is not None and f is not self.lb:
+            self.close()
+
+    def _typed(self, e):
+        if e.keysym in ("Up", "Down", "Return", "Escape", "Tab"):
+            return
+        self.refresh()
+
+    def search(self, text):
+        app = self.owner.app
+        words = text.lower().split()
+        if not words or not app.maps:
+            return []
+        recent = {}
+        for i, e in enumerate(reversed(app.profile.get("logs", []))):
+            recent.setdefault(e["map"], i)
+        hits = []
+        for m in app.maps:
+            if m["town"]:
+                continue
+            hay = f"{m['name']} {m['street']} {m['city']} {m['region_name']}".lower()
+            if all(w in hay for w in words):
+                hits.append(m)
+        name_l = text.lower().strip()
+        hits.sort(key=lambda m: (m["name"] not in recent, recent.get(m["name"], 0),
+                                 not m["name"].lower().startswith(name_l), m["name"]))
+        return hits[:40]
+
+    def refresh(self):
+        self.matches = self.search(self.var.get())
+        if not self.matches or (len(self.matches) == 1 and self.matches[0]["name"] == self.var.get()):
+            self.close()
+            return
+        if self.top is None:
+            self._open()
+        self.lb.delete(0, "end")
+        for m in self.matches:
+            area = m["city"].title() if m["city"] and m["city"] != "other" else m["region_name"]
+            self.lb.insert("end", f"{m['name']}   -   {m['street']}, {area}")
+        self.lb.selection_clear(0, "end")
+        self.lb.configure(height=min(self.ROWS, len(self.matches)))
+        self._place()
+
+    def _open(self):
+        k = self.owner.k
+        self.top = tk.Toplevel(self.owner.win)
+        self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+        frame = tk.Frame(self.top, bg="#162d5a", bd=0, highlightthickness=0)
+        frame.pack(fill="both", expand=True)
+        self.lb = tk.Listbox(frame, font=("Arial", -int(round(9.4 * k)), "bold"), bg="#ffffff", fg="#1d2b45",
+                             selectbackground="#4f7fd0", selectforeground="#ffffff", activestyle="none",
+                             highlightthickness=0, bd=0, relief="flat", exportselection=False)
+        self.lb.pack(fill="both", expand=True, padx=1, pady=(1, 0))
+        tk.Label(frame, text=MEOW_CREDIT, font=("Arial", -int(round(7.2 * k))), bg="#e8f0fa", fg="#46566e",
+                 anchor="w").pack(fill="x", padx=1, pady=(0, 1))
+        self.lb.bind("<ButtonRelease-1>", lambda e: self.pick())
+        self.lb.bind("<Motion>", lambda e: (self.lb.selection_clear(0, "end"),
+                                            self.lb.selection_set(self.lb.nearest(e.y))))
+        exclude_from_capture(top_hwnd(self.top), self.owner.app.cfg.get("hide_from_screenshots"))
+
+    def _place(self):
+        self.top.update_idletasks()
+        x, y = self.entry.winfo_rootx(), self.entry.winfo_rooty() + self.entry.winfo_height()
+        self.top.geometry(f"{max(self.entry.winfo_width(), int(300 * self.owner.k))}x{self.top.winfo_reqheight()}"
+                          f"+{x}+{y}")
+
+    def _move(self, step):
+        if self.top is None:
+            self.refresh()
+            return "break"
+        n = self.lb.size()
+        cur = self.lb.curselection()
+        i = (cur[0] + step) if cur else (0 if step > 0 else n - 1)
+        i = max(0, min(n - 1, i))
+        self.lb.selection_clear(0, "end")
+        self.lb.selection_set(i)
+        self.lb.see(i)
+        return "break"
+
+    def _enter(self, e):
+        if self.top is not None and self.lb.curselection():
+            self.pick()
+            return "break"
+        self.close()
+        return None
+
+    def pick(self):
+        cur = self.lb.curselection() if self.top is not None else ()
+        if cur:
+            m = self.matches[cur[0]]
+            self.var.set(m["name"])
+            self.owner.app.map_id = m["id"]
+            self.entry.icursor("end")
+        self.close()
+
+    def close(self):
+        if self.top is not None:
+            try:
+                self.top.destroy()
+            except tk.TclError:
+                pass
+            self.top = None
+
+
 class TrackerWindow(MapleWindow):
     """The tracker window. Tabs: TRACKER (map name, start / pause / stop, numbers, resets), LOG
     (saved sessions for the current character, grouped by map), POTIONS (which potions to count
     and where they are) and SETTINGS (which trackers are on). The character picker is in the
     title strip."""
     W, H = 384, 280
-    TABS = (("tracker", "TRACKER"), ("log", "LOG"), ("potions", "POTIONS"), ("settings", "SETTINGS"))
+    TABS = (("tracker", "TRACKER"), ("log", "LOG"), ("loot", "LOOT"), ("potions", "POTIONS"),
+            ("settings", "SETTINGS"))
 
     def __init__(self, app):
         super().__init__(app)
@@ -1861,7 +2125,11 @@ class TrackerWindow(MapleWindow):
         self.map_ent, self.map_var, self.map_item = self.entry(
             (self.u(46), self.u(48), self.Wp - self.u(112), self.u(64)), app.session.map,
             on_change=app.set_map)
-        self.map_ent.bind("<Return>", lambda e: self.win.focus_set())
+        self.map_suggest = MapSuggest(self, self.map_ent, self.map_var)
+        self.loot_query = ""
+        self.find_ent, self.find_var, self.find_item = self.entry(
+            (self.Wp - self.u(150), self.u(47), self.Wp - self.u(12), self.u(62)), "",
+            on_change=self._loot_search, max_len=30)
         g = app.cfg.get("controls_geometry")
         if g:
             self.win.geometry(g)
@@ -1875,6 +2143,7 @@ class TrackerWindow(MapleWindow):
         save_json(CONFIG_PATH, self.app.cfg)
 
     def set_tab(self, tab):
+        self.map_suggest.close()
         self.tab = tab
         self.scroll = 0
         self.app.cfg["window_tab"] = tab
@@ -1884,13 +2153,19 @@ class TrackerWindow(MapleWindow):
 
     def _show_entry(self):
         self.canvas.itemconfigure(self.map_item, state="normal" if self.tab == "tracker" else "hidden")
+        self.canvas.itemconfigure(self.find_item, state="normal" if self.tab == "loot" else "hidden")
+
+    def _loot_search(self, text):
+        self.loot_query = text.strip().lower()
+        self.scroll = 0
+        self.redraw()
 
     def set_map_text(self, text):
         if self.map_var.get() != text:
             self.map_var.set(text)
 
     def on_wheel(self, e):
-        if self.tab == "log":
+        if self.tab in ("log", "loot"):
             self.scroll -= int(e.delta / 120 * self.u(24))
             self._sig = None
             self.redraw()
@@ -1906,7 +2181,7 @@ class TrackerWindow(MapleWindow):
             return                     # the drag redraws as the mouse moves
         # the log and settings tabs only change when their data does; don't redraw every tick
         if self.tab in ("log", "settings"):
-            sig = (self.tab, self.app.logs_version, str(self.app.cfg.get("trackers")),
+            sig = (self.tab, self.app.logs_version, str(self.app.cfg.get("trackers")), str(self.app.cfg.get("profit")),
                    self.app.cfg.get("auto_profile"), self.app.cfg.get("close_with_game"),
                    self.app.cfg.get("hide_from_screenshots"))
             if sig == self._sig:
@@ -1947,7 +2222,7 @@ class TrackerWindow(MapleWindow):
         self.buttons["profile"] = (cbox, lambda: app.profile_menu(self.win.winfo_rootx() + cx0,
                                                                   self.win.winfo_rooty() + cbox[3]))
         # tabs, with the active one joined to the body
-        tw, tp = u(62), u(64)
+        tw, tp = u(60), u(62)
         for i, (tab, label) in enumerate(self.TABS):
             x0 = u(8) + i * tp
             box = (x0, u(25), x0 + tw, u(42))
@@ -2039,7 +2314,7 @@ class TrackerWindow(MapleWindow):
             hint = f"Saves to the LOG when you stop, or in {fmt_dur(max(0, SEGMENT_S - se.active))} (every hour)."
         d.text((u(12), u(100)), hint, font=font("bold", u(8)), fill=(34, 56, 92), anchor="ls")
         # one panel per tracker that's on
-        keys = [k for k in ("exp", "meso", "potions") if on.get(k)]
+        keys = [k for k in ("exp", "meso", "potions") if on.get(k) or (k == "meso" and on.get("loot"))]
         py0, py1 = u(106), u(226)
         if not keys:
             d.text((W / 2, u(165)), "All trackers are off. Turn them on in the SETTINGS tab.",
@@ -2058,13 +2333,23 @@ class TrackerWindow(MapleWindow):
                     ("Next level in", s["c_exp_extra"]), (s["c_exp_extra2_label"], s["c_exp_extra2"])])
                 name, label = "reset_exp", "RESET EXP"
             elif key == "meso":
-                d = self.panel(img, (px0, py0, px1, py1), "MESO", coin=True)
-                last = ("Profit", s["profit"], PROFIT_GREEN if s["profit_v"] >= 0 else PROFIT_RED) \
-                    if on.get("potions") else ("Average", s["c_meso_extra2"])
-                self.rows(d, px0, px1, py0 + u(36), [
-                    ("Gained", s["c_meso_total"]), ("Per hour", s["c_meso_rate"]), ("Time", s["c_meso_time"]),
-                    ("Pickups", s["c_meso_extra"]), last])
-                name, label = "reset_meso", "RESET MESOS"
+                d = self.panel(img, (px0, py0, px1, py1), "MESO" if on.get("meso") else "LOOT",
+                               coin=bool(on.get("meso")))
+                profit_row = ("Profit", s["profit"], PROFIT_GREEN if s["profit_v"] >= 0 else PROFIT_RED)
+                two = sum(bool(on.get(k)) for k in ("meso", "loot", "potions")) >= 2
+                if on.get("meso") and on.get("loot"):
+                    rows = [("Mesos", s["c_meso_total"]), ("Per hour", s["c_meso_rate"]),
+                            ("Loot", s["c_loot_total"]), ("Items", s["c_loot_items"]), profit_row]
+                elif on.get("meso"):
+                    rows = [("Gained", s["c_meso_total"]), ("Per hour", s["c_meso_rate"]), ("Time", s["c_meso_time"]),
+                            ("Pickups", s["c_meso_extra"]),
+                            profit_row if two else ("Average", s["c_meso_extra2"])]
+                else:
+                    rows = [("Loot", s["c_loot_total"]), ("Per hour", s["looth"]), ("Items", s["c_loot_items"])] + \
+                        ([profit_row] if two else [])
+                self.rows(d, px0, px1, py0 + u(36), rows)
+                name, label = (("reset_mesoloot", "RESET MESO+LOOT") if on.get("meso") and on.get("loot") else
+                               ("reset_meso", "RESET MESOS") if on.get("meso") else ("reset_loot", "RESET LOOT"))
             else:
                 d = self.panel(img, (px0, py0, px1, py1), "POTIONS")
                 pots = app.profile.get("potions", [])
@@ -2087,7 +2372,7 @@ class TrackerWindow(MapleWindow):
                         paste_icon(img, p.get("id"), px0 + u(7), py0 + u(36) + j * u(13.5) - u(10), u(11))
                 name, label = "reset_potions", "RESET POTIONS"
             self.button(img, name, (px0 + u(8), py1 - u(22), px1 - u(8), py1 - u(7)), BTN_BLUE, label,
-                        (lambda kk=key: app.reset(kk)))
+                        (lambda kk=name[6:]: app.reset(kk)))
         by0, by1 = u(232), u(252)
         self.button(img, "reset_both", (u(12), by0, u(130), by1), BTN_ORANGE, "RESET ALL",
                     lambda: app.reset("all"))
@@ -2116,23 +2401,37 @@ class TrackerWindow(MapleWindow):
             d.text((u(38), yy + u(23)), desc, font=font("reg", u(7.8)), fill=(30, 50, 84), anchor="ls")
             self.buttons[name] = (box, action)
 
+        def small(name, x, yy, w, title, value, action):
+            box = (x, yy, x + w, yy + u(17))
+            hov = self.hover == name
+            if hov:
+                d.rounded_rectangle(box, radius=u(3), fill=(170, 200, 216))
+            checkbox(d, x + u(4), yy + u(3), u(11), value, hov)
+            d.text((x + u(19), yy + u(12)), title, font=font("bold", u(8.6)), fill=WHITE, anchor="ls",
+                   stroke_width=st, stroke_fill=(38, 62, 96))
+            self.buttons[name] = (box, action)
+
         heading("TRACKERS", y)
         y += u(15)
-        toggle("t_exp", y, "EXP", "Reads the EXP number on the status bar (party bonus and quests included).",
-               on.get("exp"), lambda: app.set_tracker("exp", not on.get("exp")))
-        y += u(26)
-        toggle("t_meso", y, "Mesos", "Reads the 'You have gained mesos (+N)' pickup messages.",
-               on.get("meso"), lambda: app.set_tracker("meso", not on.get("meso")))
-        y += u(26)
-        toggle("t_potions", y, "Potions", "Reads the item counts on your quick slots (set up on the POTIONS tab).",
-               on.get("potions"), lambda: app.set_tracker("potions", not on.get("potions")))
-        y += u(27)
-        f = font("bold", u(8))
-        msg = ("PROFIT (mesos gained minus potion cost) shows when both Mesos and Potions are on."
-               if not (on.get("meso") and on.get("potions")) else
-               "PROFIT is on: mesos gained minus what your potions cost, green when you're ahead.")
-        d.text((u(14), y + u(6)), msg, font=f, fill=(34, 56, 92), anchor="ls")
-        y += u(11)
+        cw = (W - u(24)) / 4
+        for i, (k, title) in enumerate((("exp", "EXP"), ("meso", "Mesos"), ("loot", "Loot"), ("potions", "Potions"))):
+            small(f"t_{k}", u(12) + i * cw, y, cw - u(4), title, on.get(k),
+                  (lambda kk=k: app.set_tracker(kk, not app.cfg["trackers"].get(kk))))
+        y += u(20)
+        heading("PROFIT COUNTS", y)
+        y += u(15)
+        prof = app.cfg["profit"]
+        cw = (W - u(24)) / 3
+        for i, (k, title) in enumerate((("etc", "Etc items"), ("equip", "Equips"), ("scroll", "Scrolls"),
+                                        ("use", "Use items"), ("setup", "Setup items"),
+                                        ("free_potions", "Looted potions free"))):
+            r, c = divmod(i, 3)
+            small(f"p_{k}", u(12) + c * cw, y + r * u(18), cw - u(4), title, prof.get(k, True),
+                  (lambda kk=k: app.set_profit(kk, not app.cfg["profit"].get(kk, True))))
+        y += u(37)
+        d.text((u(14), y + u(6)), "PROFIT = mesos + loot that counts - potions. Loot is priced on the LOOT tab.",
+               font=font("bold", u(7.8)), fill=(34, 56, 92), anchor="ls")
+        y += u(10)
         heading("OPTIONS", y)
         y += u(15)
         toggle("o_auto", y, "Switch character automatically",
@@ -2147,6 +2446,91 @@ class TrackerWindow(MapleWindow):
                "Leaves MapleTracker out of ALL screen capture (yours too: OBS, Discord, Snipping Tool).",
                app.cfg.get("hide_from_screenshots"),
                lambda: app.set_option("hide_from_screenshots", not app.cfg.get("hide_from_screenshots")))
+
+    def draw_loot(self, img):
+        """This session's pickups first, then everything else in your price book: price (click to
+        set yours), what it adds up to, and whether it counts toward PROFIT."""
+        W, H, u, app = self.Wp, self.Hp, self.u, self.app
+        d = ImageDraw.Draw(img)
+        st = max(1, u(1.1))
+        total, rows = app.loot_summary()
+        d.text((u(12), u(59)), f"LOOT  {('+' if total >= 0 else '')}{fmt_int(total)}", font=font("black", u(9.5)),
+               fill=WHITE, anchor="ls", stroke_width=st, stroke_fill=(38, 62, 96))
+        d.text((W - u(154), u(58)), "FIND", font=font("black", u(7.4)), fill=WHITE, anchor="rs", stroke_width=st,
+               stroke_fill=(38, 62, 96))
+        q = self.loot_query
+        prof = app.cfg["profit"]
+        session = {r["name"]: r for r in rows}
+        others = [n for n in sorted(app.prices.items, key=lambda n: -app.prices.items[n].get("seen", 0))
+                  if n not in session]
+        items = [r["name"] for r in sorted(rows, key=lambda r: -r["value"])] + others
+        if q:
+            items = [n for n in items if all(w in n.lower() for w in q.split())]
+        lx0, ly0, lx1, ly1 = u(10), u(68), W - u(11), H - u(42)
+        d.rectangle([lx0, ly0, lx1, ly1], fill=LIST_BG, outline=NAVY)
+        if not items:
+            msg = ("Nothing matches." if q else
+                   "Nothing picked up yet. Items you loot while the tracker runs show up here - click a price "
+                   "to set what it's worth to you.")
+            y = ly0 + u(20)
+            for line in wrap_text(d, msg, font("bold", u(8.4)), lx1 - lx0 - u(24)):
+                d.text((lx0 + u(12), y), line, font=font("bold", u(8.4)), fill=(70, 86, 110), anchor="ls")
+                y += u(12)
+        RH = u(21)
+        vh = ly1 - ly0 - 2
+        total_h = len(items) * RH
+        self.scroll = max(0, min(self.scroll, total_h - vh))
+        first = self.scroll // RH
+        y = ly0 + 1 - (self.scroll % RH)
+        for i in range(first, len(items)):
+            if y > ly1 - RH:
+                break
+            name = items[i]
+            r = session.get(name)
+            e = app.prices.items.get(name, {})
+            unit, src = (r["unit"], r["src"]) if r else app.prices.unit(name)
+            kind = r["kind"] if r else loot_kind(name, e.get("cat"))
+            counted = r["included"] if r else (e.get("include", True) and prof.get(kind, True))
+            d = ImageDraw.Draw(img)
+            d.rectangle([lx0 + 1, y, lx1 - 1, y + RH - 1], fill=LIST_ALT if i % 2 else LIST_BG)
+            ink = INK if counted else (150, 158, 172)
+            d.text((lx0 + u(7), y + u(10)), fit_text(d, name, font("bold", u(8.4)), u(140)), font=font("bold", u(8.4)),
+                   fill=ink, anchor="ls")
+            tag = {"potion": "your potion", "scroll": "scroll"}.get(kind, (e.get("cat") or kind).lower())
+            if not prof.get(kind, True) and kind != "potion":
+                tag += " (off in SETTINGS)"
+            d.text((lx0 + u(7), y + u(18.5)), tag, font=font("reg", u(6.8)), fill=(110, 122, 144), anchor="ls")
+            d.text((lx0 + u(176), y + u(14)), f"x{r['qty']}" if r else "", font=font("bold", u(8.4)), fill=ink,
+                   anchor="rs")
+            label = (fmt_int(unit) + {"you": "", "NPC": " NPC", "default": "", "potion": " pot"}.get(src, "")) \
+                if src else "SET PRICE"
+            if kind == "potion":
+                self.button(img, f"ip:{name}", (lx0 + u(182), y + u(3), lx0 + u(246), y + u(17)), BTN_GREY, label,
+                            lambda: None, enabled=False)
+            else:
+                self.button(img, f"ip:{name}", (lx0 + u(182), y + u(3), lx0 + u(246), y + u(17)),
+                            BTN_GREY if src else BTN_ORANGE, label, (lambda n=name: app.ask_item_price(n)))
+            d = ImageDraw.Draw(img)
+            if r:
+                d.text((lx1 - u(26), y + u(14)), ("+" if counted else "") + fmt_int(r["value"]),
+                       font=font("bold", u(8.6)), fill=(24, 128, 34) if counted else (150, 158, 172), anchor="rs")
+            cb = (lx1 - u(20), y + u(4), lx1 - u(7), y + u(17))
+            checkbox(d, cb[0], cb[1], u(12), e.get("include", True), self.hover == f"ii:{name}")
+            if kind != "potion":
+                self.buttons[f"ii:{name}"] = (tuple(int(v) for v in cb), (lambda n=name: app.toggle_item(n)))
+            y += RH
+        if total_h > vh:
+            sx0 = lx1 - u(4)
+            th = max(u(12), int(vh * vh / total_h))
+            ty0 = ly0 + 1 + int((vh - th) * self.scroll / max(1, total_h - vh))
+            d.rectangle([sx0, ty0, lx1 - 1, ty0 + th], fill=(60, 110, 200))
+        d = ImageDraw.Draw(img)
+        y = H - u(32)
+        msg = ("Click a price to set what an item is worth to you (empty = the NPC price). Untick an item - or "
+               "switch a kind off in SETTINGS - to leave it out of PROFIT. Item names: NiaDB (meowdb.com).")
+        for line in wrap_text(d, msg, font("bold", u(7.6)), W - u(24))[:2]:
+            d.text((u(12), y), line, font=font("bold", u(7.6)), fill=(34, 56, 92), anchor="ls")
+            y += u(10)
 
     def draw_potions(self, img):
         """Left: this character's potions (drag one by its icon). Right: a picture of the game's
@@ -2383,6 +2767,9 @@ class TrackerWindow(MapleWindow):
                     if e.get("meso_h"):
                         b += f" ({fmt_short(e['meso_h'])}/h)"
                     runs.append((b, f2, (52, 66, 92)))
+                if "loot_value" in e:
+                    n_items = sum(r["qty"] for r in e.get("loot", []))
+                    runs.append((f"Loot +{fmt_int(e['loot_value'])} ({n_items} items)", f2, (40, 110, 50)))
                 if "pot_cost" in e:
                     used = sum(p["used"] for p in e.get("potions", {}).values())
                     runs.append((f"Potions -{fmt_int(e['pot_cost'])} ({used} used)", f2, (150, 60, 50)))
@@ -2418,6 +2805,7 @@ class TrackerWindow(MapleWindow):
     def close(self):
         if self.closed:
             return
+        self.map_suggest.close()
         try:
             self.app.cfg["controls_geometry"] = f"+{self.win.winfo_x()}+{self.win.winfo_y()}"
             save_json(CONFIG_PATH, self.app.cfg)
@@ -2540,7 +2928,13 @@ class App:
         self.pot_now = {}               # potion index -> count read right now (for the POTIONS tab)
         self.ocr = Ocr()
         self.msgs = MessageReader(self.ocr)          # mesos (a narrow strip reads best)
-        self.items = MessageReader(self.ocr)         # item pickups (a wider strip: long names)
+        self.names = ItemNames()                     # real item names (NiaDB's list, cached)
+        self.items = MessageReader(self.ocr, canon=self.canon_item)   # item pickups (a wider strip)
+        self.prices = PriceBook()
+        self.meow = MeowDB(self, online=bool(self.cfg.get("niadb_online")))
+        self.meow.item_index(lambda idx: self.names.set_names(idx.keys()) if idx else None)
+        self.maps, self.map_id = [], None
+        self.meow.maps(lambda maps: setattr(self, "maps", maps or []))
         self.quit = False
         self.controls = None
         self.prompt = None
@@ -2654,7 +3048,8 @@ class App:
         se = self.session
         if not se.loggable():
             return None
-        entry = se.log_entry(reason, self.watcher.need, self.cfg["trackers"])
+        entry = se.log_entry(reason, self.watcher.need, self.cfg["trackers"], self.loot_summary())
+        self.prices.save()
         self.profile["logs"].append(entry)
         self.profiles.save(self.profile)
         self.logs_version += 1
@@ -2666,8 +3061,10 @@ class App:
     def reset(self, which):
         if which in ("exp", "both", "all"):
             self.session.reset_exp()
-        if which in ("meso", "both", "all"):
+        if which in ("meso", "mesoloot", "both", "all"):
             self.session.reset_meso()
+        if which in ("loot", "mesoloot", "all"):
+            self.session.reset_loot()
         if which in ("potions", "all"):
             self.session.reset_potions()
         log(f"reset {which}")
@@ -2798,6 +3195,41 @@ class App:
         if key == "potions":
             self.counters = {}
         log(f"{key} tracker {'on' if on else 'off'}")
+        self.render(time.time())
+
+    def set_profit(self, key, on):
+        self.cfg["profit"][key] = bool(on)
+        save_json(CONFIG_PATH, self.cfg)
+        self.render(time.time())
+
+    def ask_item_price(self, name):
+        unit, src = self.prices.unit(name)
+        e = self.prices.items.get(name) or {}
+
+        def ok(text):
+            text = (text or "").replace(",", "").replace("mesos", "").strip().lower()
+            if text in ("", "npc", "-"):
+                self.prices.set_price(name, None)            # back to the NPC / default price
+            else:
+                try:
+                    v = int(float(text[:-1]) * 1000) if text.endswith("k") else \
+                        int(float(text[:-1]) * 1_000_000) if text.endswith("m") else int(text)
+                except ValueError:
+                    return "Type a number, like 2500, 25k or 1.5m."
+                if v < 0:
+                    return "That price doesn't look right."
+                self.prices.set_price(name, v)
+            self.logs_version += 1
+            self.render(time.time())
+        npc = e.get("npc")
+        hint = f" NPC buys it for {fmt_int(npc)}." if npc is not None else ""
+        self.ask("Item price", f"What is one {name} worth to you (mesos)? Leave empty for the NPC price.{hint}",
+                 ok, initial="" if e.get("price") is None else str(e["price"]), ok_text="SAVE")
+
+    def toggle_item(self, name):
+        e = self.prices.entry(name)
+        self.prices.set_include(name, not e.get("include", True))
+        self.logs_version += 1
         self.render(time.time())
 
     def set_option(self, key, on):
@@ -3017,12 +3449,17 @@ class App:
         x0, y0, y1 = cx + cw - a["width"] * s, cy + ch - a["top"] * s, cy + ch - a["bottom"] * s
         self.regions["the pickup messages"] = (x0, y0, cx + cw, y1)
         shot = self._grab(x0, y0, cx + cw - x0, y1 - y0)
-        if self.cfg.get("debug"):
+        if self.cfg["trackers"].get("loot"):
             wx0 = cx + cw - self.cfg["item_area_width"] * s
             for ev in self.items.update(self._grab(wx0, y0, cx + cw - wx0, y1 - y0), s, now):
-                if ev[0] == "item":
-                    _, name, qty, cat = ev
-                    log(f"picked up {name} x{qty}" + (f" ({cat})" if cat else ""))
+                if ev[0] != "item" or not ev[1]:
+                    continue
+                _, name, qty, cat = ev
+                self.prices.seen(name, cat or None)
+                self.session.add_loot(name, qty, cat or None)
+                if self.cfg["debug"]:
+                    log(f"picked up {name} x{qty}" + (f" ({cat})" if cat else "")
+                        + ("" if self.session.running else " (not running: not counted)"))
         for ev in self.msgs.update(shot, s, now):
             if ev[0] != "meso":
                 continue
@@ -3032,6 +3469,35 @@ class App:
             self.session.add_meso(amt)
             if self.cfg["debug"]:
                 log(f"mesos +{amt:,}" + ("" if self.session.running else " (not running: not counted)"))
+
+    def canon_item(self, raw):
+        """The real name of an item read off the screen; None for OCR junk (when the item list is
+        known, a name that matches nothing in it isn't counted)."""
+        name = self.names.canon(raw)
+        if self.names.names and name not in self.names.lower.values():
+            return None
+        return name
+
+    def loot_summary(self):
+        """(value of this session's loot that counts toward profit, [rows]) - priced right now."""
+        pots = {p["name"].lower(): p for p in self.profile.get("potions", [])}
+        prof = self.cfg["profit"]
+        total, rows = 0, []
+        for name, e in sorted(self.session.loot.items()):
+            unit, src = self.prices.unit(name)
+            kind = loot_kind(name, e.get("cat"))
+            entry = self.prices.items.get(name) or {}
+            include = entry.get("include", True) and prof.get(kind, True)
+            pot = pots.get(name.lower())
+            if pot and prof.get("free_potions", True):
+                # your own potion, looted: worth what you'd pay for it, so drinking it costs nothing
+                unit, src, kind, include = pot.get("price") or 0, "potion", "potion", True
+            value = e["qty"] * unit
+            if include:
+                total += value
+            rows.append({"name": name, "qty": e["qty"], "unit": unit, "src": src, "kind": kind,
+                         "value": value, "included": include})
+        return total, rows
 
     def scan_name(self, rect, s):
         """Read the character's name off the status bar; switch to that character's profile once
@@ -3139,9 +3605,18 @@ class App:
         }
         on = self.cfg["trackers"]
         pr = per_hour(se.pot_cost, se.pot_t)
-        profit = se.meso - se.pot_cost
-        profit_h = per_hour(profit, min(se.meso_t, se.pot_t))
+        loot_v, loot_rows = self.loot_summary()
+        lh = per_hour(loot_v, se.loot_t)
+        profit = (se.meso if on.get("meso") else 0) + (loot_v if on.get("loot") else 0) - \
+            (se.pot_cost if on.get("potions") else 0)
+        profit_h = per_hour(profit, se.active)
+        n_items = sum(r["qty"] for r in loot_rows)
         s.update({
+            "loot": ("+" if loot_v >= 0 else "") + fmt_int(loot_v), "looth": (fmt_short(lh) + "/h") if lh is not None else "-/h",
+            "lootx": f"{n_items} item{'s' if n_items != 1 else ''}" + (
+                f"  ·  {sum(1 for r in loot_rows if r['included'] and not r['unit'])} unpriced"
+                if any(r["included"] and not r["unit"] for r in loot_rows) else ""),
+            "c_loot_total": fmt_int(loot_v), "c_loot_items": fmt_int(n_items),
             "on": dict(on), "pots_setup": bool(self.profile.get("potions")),
             "pots": [(p.get("id"), name, p["used"]) for name, p in se.pots.items() if p["used"]],
             "potcost": fmt_int(se.pot_cost), "poth": (fmt_short(pr) + "/h") if pr is not None else "-/h",
@@ -3195,6 +3670,7 @@ class App:
                 return
         se = self.session
         se.advance(dt)
+        self.meow.poll()
         if se.running and se.active >= SEGMENT_S:
             # an hour of tracking: log it and carry on with a fresh hour at the same map
             if self._log_session("1 hour"):
