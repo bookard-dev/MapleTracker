@@ -79,7 +79,7 @@ DEFAULTS = {
     "underlay": "off",              # a panel behind the overlay text: "off", "light" or "dark"
     "underlay_opacity": 0.55,       # 0..1, set with the slider on the SETTINGS tab
     "exp_display": "exp",           # the overlay's EXP rate: "exp" (EXP/h), "pct" (level %/h) or "both"     # the overlay's loot grid (click LOOT on the overlay)             # maps opened on the LOG tab
-    # where things are on screen, in game units (screen px / (client height / 768)):
+    # where things are on screen, in game units (screen px / ui_scale: client height / 768, min 1):
     # EXP number on the status bar, measured from the bottom-centre of the game
     "exp_text": {"dx0": 62, "dx1": 172, "dy0": 31, "dy1": 20},
     # pickup message stack, measured from the bottom-right corner of the game
@@ -488,7 +488,7 @@ def meso_amount(text):
 
 # "Gold Ore x1 earned. (Etc)" - OCR often garbles the "x1" ("Kl", "gl", "B.I") and the brackets
 EARNED_RE = re.compile(r"\s([eabgp]?[ae]?[ae]?[rm][rnm]?[a-z.\]\[|}\-'\"æ ]{0,6}?\.?)\s*"
-                       r"((?:\(|\{|OJ|0-|I-I).{0,8})?$", re.I)
+                       r"((?:\(|\{|[OQC]J|0-|I-I|C(?=[a-zJ])).{0,8})?$", re.I)    # "(Use)" read as "QJse)", "Ctc)"
 QTY_JUNK = {"kl", "ki", "gl", "gi", "hi", "hl", "b.i", "v.i", "r.l", "xl", "xi", "x|", "{1", "(1", "ri", "yi", "y1"}
 CATS = {"e": "Etc", "u": "Use", "s": "Setup", "q": "Equip"}
 
@@ -499,8 +499,8 @@ def item_pickup(text):
     if "meso" in text.lower() or MESO_WORD_RE.search(text) and AMOUNT_RE.search(text):
         return None
     m = EARNED_RE.search(text)
-    if not m or m.start() < 2:
-        return None
+    if not m or m.start() < 2 or len(m.group(1).strip(" .")) < 4:
+        return None                     # (a lone "r" isn't "earned": "Blown r" is scenery noise)
     name = text[:m.start()].strip()
     qty = 1
     # "x14" read as "Kl 4" / "x1 4": a garbled x1 followed by the rest of the number
@@ -715,6 +715,34 @@ class ItemFeed(MessageReader):
         self.y0 = None              # where the bottom line sits (px, in the strip)
         self.slots = {}             # slot -> record {"votes", "qty", "cat", "counted", "seen", "sig"}
 
+    SMALL_S = 1.6       # below this UI scale the text is small: read it a second way too
+
+    def read_lines(self, bgr, s):
+        """Small windows (1280x720: 9 px letters) garble names when only the text mask is
+        enlarged ("Red Podon", "Sdff Feaher"). Enlarging the picture first and cutting the letters
+        out of that keeps the strokes smooth and reads most names right, but loses others. So
+        both are read, and per line the one that names a real item wins."""
+        lines, d, any_text = super().read_lines(bgr, s)
+        if not any_text or s >= self.SMALL_S:
+            return lines, d, any_text
+        lh = DEFAULTS["msg_line_h"] * s
+        f = 2
+        big = cv2.resize(bgr, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
+        m = cv2.dilate(text_mask(big, f).astype(np.uint8), np.ones((2, 2), np.uint8))
+        img = np.where(m > 0, 0, 255).astype(np.uint8)
+        img = cv2.copyMakeBorder(img, self.PAD, self.PAD, self.PAD, self.PAD, cv2.BORDER_CONSTANT, value=255)
+        out = list(lines)
+        for text, x, y, w, h in self.ocr.lines(img):
+            y = (y - self.PAD) / f
+            if h / f < 0.4 * lh or self._sig(text)[0] is None:
+                continue
+            near = [i for i, (yy, _) in enumerate(out) if abs(yy - y) < 0.5 * lh]
+            if not near:
+                out.append((y, text))
+            elif self._sig(out[near[0]][1])[0] is None:
+                out[near[0]] = (out[near[0]][0], text)       # keep the first read's position
+        return sorted(out), d, any_text
+
     def _sig(self, text):
         if meso_amount(text) is not None:
             return ("meso",), None
@@ -892,14 +920,38 @@ def slot_origin(col, row, rect, s, cfg):
             cy + ch - (q["dy"] - q["pitch_y"] * row) * s)
 
 
+def ui_scale(rect, cfg):
+    """Screen pixels per game unit. The game scales its UI with the window's height (768 = 1.0)
+    but never shrinks it: a 1280x720 window has the UI at full size (measured 2026-11-13 at
+    1280x720, 1366x768, 1920x1080 and 2560x1440)."""
+    return max(1.0, rect[3] / cfg["game_base_height"])
+
+
+def blank_quickslots(img, left, top, rect, s, cfg):
+    """Black out the quick slot panel where it reaches into a screenshot of the message area
+    (img's top left at screen (left, top)). On windows narrower than the game's 1366 units it
+    sits right next to the messages, and its white key labels ("WORLD MAP") read as text."""
+    x0, y0 = slot_origin(0, 0, rect, s, cfg)
+    x1, y1 = slot_origin(3, 2, rect, s, cfg)
+    m = 7 * s
+    bx0, by0 = int(x0 - m - left), int(y0 - m - top)
+    bx1, by1 = int(np.ceil(x1 + 28 * s + m - left)), int(np.ceil(y1 + 31 * s + m - top))
+    h, w = img.shape[:2]
+    if bx1 > 0 and by1 > 0 and bx0 < w and by0 < h:
+        img[max(0, by0):min(h, by1), max(0, bx0):min(w, bx1)] = 0
+    return img
+
+
 def native_size(rect, cfg):
     """The size the game draws its picture at before stretching it to the window (1366x768 for a
-    16:9 window); config "native_size" overrides it."""
+    16:9 window; a window under 768 high is drawn 1:1); config "native_size" overrides it."""
     if cfg.get("native_size"):
         return tuple(cfg["native_size"])
     w, h = rect[2], rect[3]
     if h <= 0:
         return 1366, 768
+    if h < cfg.get("game_base_height", 768):
+        return w, h
     return (1366 if abs(w / h - 16 / 9) < 0.01 else int(round(768 * w / h))), 768
 
 
@@ -4293,7 +4345,7 @@ class App:
         rect = client_rect(hwnd)
         if rect[2] <= 0 or rect[3] <= 0:
             return None
-        s = rect[3] / self.cfg["game_base_height"]
+        s = ui_scale(rect, self.cfg)
         x0, y0 = slot_origin(0, 0, rect, s, self.cfg)
         x1, y1 = slot_origin(3, 2, rect, s, self.cfg)
         m = 7 * s
@@ -4416,10 +4468,11 @@ class App:
         a = self.cfg["msg_area"]
         x0, y0, y1 = cx + cw - a["width"] * s, cy + ch - a["top"] * s, cy + ch - a["bottom"] * s
         self.regions["the pickup messages"] = (x0, y0, cx + cw, y1)
-        shot = self._grab(x0, y0, cx + cw - x0, y1 - y0)
+        shot = blank_quickslots(self._grab(x0, y0, cx + cw - x0, y1 - y0), int(x0), int(y0), rect, s, self.cfg)
         if self.cfg["trackers"].get("loot"):
             wx0 = cx + cw - self.cfg["item_area_width"] * s
-            for ev in self.items.update(self._grab(wx0, y0, cx + cw - wx0, y1 - y0), s, now):
+            strip = blank_quickslots(self._grab(wx0, y0, cx + cw - wx0, y1 - y0), int(wx0), int(y0), rect, s, self.cfg)
+            for ev in self.items.update(strip, s, now):
                 if ev[0] != "item" or not ev[1]:
                     continue
                 _, name, qty, cat = ev
@@ -4727,7 +4780,7 @@ class App:
             self.overlay.place(hwnd)
         if game_front:
             rect = client_rect(hwnd)
-            s = rect[3] / self.cfg["game_base_height"]
+            s = ui_scale(rect, self.cfg)
             if rect[2] > 0 and rect[3] > 0:
                 on = self.cfg["trackers"]
                 try:
