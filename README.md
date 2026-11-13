@@ -2,7 +2,7 @@
 
 EXP, meso, loot, potion and profit tracker overlay for MapleStory Classic.
 
-<p align="center"><img src="docs/overlay.png" alt="The overlay over the game: map, EXP per hour with a level gauge, mesos, potions used, loot and profit"></p>
+<p align="center"><img src="docs/overlay.png" alt="The overlay over the game, plain and with its dark background: map and session time, play / pause / stop buttons, EXP per hour (and level % per hour) with a level gauge, mesos, potions used, the loot grid and profit"></p>
 
 **Start:** double-click `Start MapleTracker.bat`. It closes by itself when MapleStory closes.
 It only takes screenshots and is read-only: no memory reading, nothing injected, no input sent to the game, and no keyboard hooks or hotkeys.
@@ -73,6 +73,8 @@ It only takes screenshots and is read-only: no memory reading, nothing injected,
 Type in the **MAP** box and a list of matching maps drops down (towns left out, your recent maps first): Up/Down and Enter, or click. Anything you type still works as a map name.
 
 **MOBS** next to the map box shows the map's monsters and what they drop, from NiaDB's community **Drops (MS Classic)** lists. Each drop shows its player votes (more = more players saw it drop in Classic), what it's worth to you, and a box to leave it out of PROFIT. Quest items are left out.
+
+<p align="center"><img src="docs/mobs.png" alt="The MOBS window: a map's monsters and what each drops in MS Classic, with player votes, prices and PROFIT checkboxes"></p>
 
 ## NiaDB data
 
