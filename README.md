@@ -97,6 +97,8 @@ The overlay appears over the game. Press **â–¶** to start a session, and the **â
 
 Map names, item names, icons, NPC prices and monster drops come from [NiaDB](https://meowdb.com). Looked-up data is kept in `meowdb_cache/`. Online lookups are off by default (`"niadb_online"` in `tracker_config.json`); when on, MapleTracker asks for at most one page every 10 seconds and stops if NiaDB refuses. Pages saved from meowdb.com with Ctrl+S into `meowdb_import/` are imported too.
 
+NPC sell prices, and the monsters on a map, can be filled in from the [MapleClassic Wiki](https://mapleclassic.wiki) with `python tools/fetch_prices.py` (add `--map "The Murky Swamp II"` for a map). It's run by hand, looks up only what's missing, and asks for 50 pages at a time, a few seconds apart. A price from a saved NiaDB item page always wins.
+
 ### Files and settings
 
 - `tracker_config.json`: screen positions (in game units, measured on a 2560x1440 window), overlay and window size (`overlay_scale`, `window_scale`), and `native_size` if your game doesn't render at 1366x768.
@@ -108,7 +110,8 @@ Map names, item names, icons, NPC prices and monster drops come from [NiaDB](htt
 
 ## Credits
 
-- Map, monster and item data: [NiaDB](https://meowdb.com), used with permission.
+- Map, monster and drop data: [NiaDB](https://meowdb.com), used with permission.
+- NPC sell prices and map monsters: [MapleClassic Wiki](https://mapleclassic.wiki), under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). Data taken from the wiki keeps that license, and each item records the wiki page it came from.
 - MapleStory is a trademark of NEXON. MapleTracker is a fan-made tool and isn't affiliated with NEXON or NiaDB.
 
 ## License

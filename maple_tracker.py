@@ -1083,7 +1083,7 @@ MEOW_BASE = "https://meowdb.com/msclassic"
 MEOW_UA = "MapleTracker/1.0 (+https://github.com/bookard-dev/MapleTracker)"
 MEOW_GAP_S = 10.0
 MEOW_DIR = os.path.join(HERE, "meowdb_cache")
-MEOW_CREDIT = "Map, monster and item data: NiaDB (meowdb.com)"
+MEOW_CREDIT = "Data: NiaDB (meowdb.com)  ·  prices: MapleClassic Wiki (CC BY-NC-SA 4.0)"
 
 
 def _next_payload(html_text):
