@@ -1,121 +1,116 @@
 # MapleTracker
 
-EXP, meso, loot, potion and profit tracker overlay for MapleStory Classic.
+**See exactly what your grind is worth.** A game-style overlay for MapleStory Classic that tracks your EXP, mesos, loot, potions and profit per hour while you hunt.
 
 <p align="center"><img src="docs/overlay.png" alt="The overlay over the game, plain and with its dark background: map and session time, play / pause / stop buttons, EXP per hour (and level % per hour) with a level gauge, mesos, potions used, the loot grid and profit"></p>
 
-**Start:** double-click `Start MapleTracker.bat`. It closes by itself when MapleStory closes.
-It only takes screenshots and is read-only: no memory reading, nothing injected, no input sent to the game, and no keyboard hooks or hotkeys.
+- **EXP per hour**, as raw EXP, level % or both, plus time to your next level
+- **Mesos per hour**, counted from your pickup messages
+- **Loot**: every item you pick up, with its icon and what it's worth
+- **Potions used**, read from your own quick slots
+- **Profit per hour**: mesos + loot − potions, in green or red
+- **A log of every session**, per map and per character, so you can compare training spots
 
-## At a glance
+**Safe by design.** MapleTracker only looks at the screen. It never reads game memory, never injects anything, never sends keys or clicks to the game, and doesn't listen to your keyboard.
+
+## Getting started
+
+1. Install [Python](https://www.python.org/) 3.10 or newer (Windows 10 or 11).
+2. Install what MapleTracker needs:
+   ```
+   python -m pip install mss numpy opencv-python pillow winrt-runtime winrt-Windows.Media.Ocr winrt-Windows.Graphics.Imaging winrt-Windows.Storage.Streams winrt-Windows.Globalization winrt-Windows.Foundation winrt-Windows.Foundation.Collections
+   ```
+3. Double-click **`Start MapleTracker.bat`**.
+
+The overlay appears over the game. Press **▶** to start a session, and the **⚙** button opens the tracker window. MapleTracker closes by itself when you close MapleStory.
+
+## A quick tour
 
 | | |
 |---|---|
 | ![Tracker tab](docs/tracker.png) | ![Loot tab](docs/loot.png) |
-| **TRACKER:** the session you're hunting - EXP, mesos, loot, potions, profit, start / pause / stop | **LOOT:** what you picked up and what it's worth at your prices (or the NPC's), included in profit or not |
+| **Tracker:** your current session at a glance | **Loot:** everything you picked up and what it's worth |
 | ![Potions tab](docs/potions.png) | ![Log tab](docs/log.png) |
-| **POTIONS:** drag each potion onto your own quick slot; each use is counted from the number on it | **LOG:** every session saved per map and per character, with EXP/h and profit/h |
+| **Potions:** drag your potions onto your quick slots | **Log:** past sessions by map, with EXP/h and profit/h |
 | ![Choosing the map](docs/map_search.png) | ![Settings tab](docs/settings.png) |
-| **MAP:** type part of a map's name and pick it | **SETTINGS:** pick which trackers run and what profit counts |
+| **Map:** type a few letters and pick your map | **Settings:** choose what to track and how it looks |
 
 <sub>The pictures use made-up sample data.</sub>
 
-| | |
-|---|---|
-| **Overlay** | Game-style outlined text straight over the game (transparent background). It shows the session state and map, EXP gained [EXP/h], an EXP-bar gauge with level % and time to level up, mesos gained [mesos/h], and pickups |
-| The overlay's buttons (top right) | **Gear:** the tracker window, drawn like a game window (drag it by its title strip; Esc or X closes it). **Play / pause:** start, pause and resume. **Stop:** stop and save the session |
-| Right-click the overlay, or start MapleTracker again | Also opens the tracker window |
-| Click **LOOT** on the overlay | Open or close the loot grid: the icon and count of everything you've picked up this session, most first |
-| **SETTINGS > OVERLAY** | Show EXP as EXP/h, level %/h or both, and put a light or dark rounded background behind the overlay (opacity slider) so it reads over bright or dark maps |
-| Drag the overlay's text | Move it (the position is remembered). Size: `overlay_scale` / `window_scale` in `tracker_config.json` |
+## How to use it
 
-## Sessions, logs and characters
+### The overlay
 
-- **MapleTracker starts stopped.** Nothing counts until you press **START** (or the overlay's play button), so walking around town doesn't count.
-- **PAUSE** freezes both the numbers and the clock. EXP you gain while paused is never counted, even after you resume.
-- **STOP & SAVE** ends the session. Type a name in the **MAP** box (for example `Kerning Subway <Line 1>`) and the session is saved to the **LOG** tab:
-  - when you press STOP & SAVE,
-  - after every hour of tracking (the session then carries on with a fresh hour at the same map),
-  - when the game closes or you quit MapleTracker.
+- **⚙ / ▶ / ⏸ / ■** at the top right open the tracker window, start or pause, and stop and save.
+- **Drag** the overlay anywhere; it remembers where you put it.
+- **Click LOOT** to show or hide a grid of everything you've picked up.
+- In **Settings**, give it a light or dark background (with an opacity slider) so it's easy to read on any map, and pick how EXP is shown: EXP/h, %/h or both.
 
-  Sessions without a map name, or shorter than 1 minute, aren't logged.
-- **LOG tab:** sessions are grouped by map. Each map shows how many sessions it has, the total time, and the average EXP/h and mesos/h. Click a map to see its sessions: date and time, length, EXP (per hour and level %/hour), mesos (per hour, pickups). **X** deletes one session and **CLEAR ALL** deletes them all; both ask first. Logs are kept between runs.
-- **Switching characters automatically:** MapleTracker reads your character's name off the status bar (under your class, next to LV) and switches to that character's profile when you log into another one.
-  - It needs the same name read 3 times in a row, about 6 seconds.
-  - A character it hasn't seen before gets a new profile, after 5 reads.
-  - Capitals and letters OCR mixes up (I/l/1, O/0) don't matter, but "Maple" and "Maple2" stay separate characters.
-  - Turn it off in SETTINGS ("Switch character automatically").
-- **CHARACTER** (top right of the window) switches between characters by hand. Each character has its own logs in `profiles/<name>.json`. The same menu adds, renames and deletes characters. Switching character during a session stops it and saves it to the character you were on.
-- **RESET EXP / MESOS / POTIONS / ALL** zero those numbers in the current session, without saving them to the log.
+### Hunting sessions
 
-## Potions and profit
+- MapleTracker **starts stopped**, so walking around town doesn't count. Press ▶ when you start hunting.
+- **Pause** freezes everything, the clock included.
+- Type your map's name in the **MAP** box. The session is then saved to your **Log** when you press stop, every hour, and when the game closes.
 
-- **POTIONS tab:**
-  - **ADD POTION** opens the common HP/MP items (Classic item IDs, icons and NPC shop prices from [NiaDB](https://meowdb.com)). **CUSTOM ITEM...** is for anything else: type its name and price. Click a price to change it.
-  - On the right is a live picture of *your* quick slots, with your keys and your items. Drag each potion onto the slot it's on; drag it off a slot to remove it. When an icon is clearly visible in a slot, it's placed automatically.
-  - Each character has its own potions.
-- **How usage is counted:** it reads the item count on each potion's quick slot, and only *drops* in the count are counted. A drop or a purchase raises the count, and that just becomes the new starting point. So 80 → 75 → (loot) 76 → 70 counts 5 + 6 = 11 used.
-- A big drop all at once (more than 12) is assumed to be moving, dropping or selling the stack, so it isn't counted.
-- **PROFIT** = mesos gained + the loot that counts − potion cost. It's green when you're ahead and red when you spent more than you made. It shows on the overlay, the TRACKER tab and every log entry, whenever at least two of Mesos, Loot and Potions are on.
-- **SETTINGS tab:** switch the EXP, Mesos, Loot and Potions trackers on or off independently, choose what PROFIT counts (Etc items, Equips, Scrolls, Use items, Setup items, and whether looted potions are free), and set the options below.
+### Loot and profit
 
-## Loot and prices
+- Pickups are counted as they happen, with the item's icon and value.
+- Items are worth their NPC price until you set your own: click a price on the **Loot** tab and type `2500`, `25k` or `1.5m`.
+- Untick an item (or a whole kind, like equips, in **Settings**) to leave it out of your profit.
+- Potions you loot count as free, so drinking them later doesn't look like a loss.
 
-- **Pickups** ("Gold Ore x1 earned. (Etc)") are read from the same messages as mesos. Each message is followed line by line as the stack scrolls up, so every pickup counts exactly once, even when several arrive together or the same item drops twice in a row. Names the OCR garbles or the game cuts short ("Animal Fur Bun...") are matched to the real item names, and junk that matches no item is ignored.
-- **LOOT tab:** this session's pickups first, then everything in your price book (search with FIND).
-  - **Click a price** to set what an item is worth to you: `2500`, `25k` or `1.5m`, or leave it empty for the NPC sell-back price. Scrolls default to 1 meso.
-  - **Untick** an item to leave it out of PROFIT. You can also switch whole kinds off in SETTINGS.
-  - Prices are shared by all your characters and saved in `prices.json`.
-- **Looted potions are free:** a potion you've set up on the POTIONS tab is valued at its own price when you loot it, so drinking it later evens out instead of counting as a loss. Turn this off in SETTINGS.
+### Potions
 
-## Choosing the map
+- On the **Potions** tab, add the potions you use, then drag each one onto its quick slot in the live picture of *your* quick slots.
+- Only potions you drink are counted. Looting or buying more doesn't throw it off.
 
-Type in the **MAP** box and a list of matching maps drops down (towns left out, your recent maps first): Up/Down and Enter, or click. Anything you type still works as a map name.
+### Maps and drops
 
-**MOBS** next to the map box shows the map's monsters and what they drop, from NiaDB's community **Drops (MS Classic)** lists. Each drop shows its player votes (more = more players saw it drop in Classic), what it's worth to you, and a box to leave it out of PROFIT. Quest items are left out.
+- Start typing in the **MAP** box and pick your map from the list.
+- **MOBS** shows the map's monsters and what they drop in MS Classic, ranked by player votes, with each item's price.
 
 <p align="center"><img src="docs/mobs.png" alt="The MOBS window: a map's monsters and what each drops in MS Classic, with player votes, prices and PROFIT checkboxes"></p>
 
-## NiaDB data
+### Characters
 
-The map list, item names, icons and NPC prices come from [NiaDB](https://meowdb.com). What's been looked up is saved in `meowdb_cache/`. New lookups (`"niadb_online": true` in the config) are off until NiaDB has approved the tool. When on, MapleTracker asks for at most one page every 10 seconds, one at a time, and stops if NiaDB says no (429 / 403).
+- MapleTracker reads your character's name and keeps separate logs and potions for each one, switching automatically when you change characters.
+- You can also switch, add or rename characters from the **Character** menu in the tracker window.
 
-The count digits are read on the game's own pixel grid. The game draws at 1366x768 and stretches that to the window, so each count corner is shrunk back exactly. There, every digit is the same crisp pixel-font shape wherever it sits (1xx, 5xx and 999 alike); set `native_size` in the config if your game uses another resolution. The digit templates in `count_glyphs.npz` are built by `tools/build_count_glyphs.py` from labelled recordings (`captures/qs*`, `captures/extra_labels.json`):
+## Tips
 
-- `--check` reads every labelled count and replays the recordings through the potion counter.
-- `--holdout` learns from part of the data and tests on the rest.
+- **Keep it clear of the status bar, your quick slots and the bottom-right messages.** MapleTracker reads those, and the overlay shows a red warning if it's covering one.
+- **Recording or streaming?** "Hide from screenshots" in Settings lets the overlay sit anywhere, but it then won't show up in OBS or Discord either.
+- **Nothing being read?** Windows' text reader needs an English language pack: Settings > Time & language > Language.
+- **Lost the tracker window?** Right-click the overlay, or start MapleTracker again.
 
-## How it reads the game
+<details>
+<summary><b>Technical details</b></summary>
 
-- **EXP** comes from the status bar number (`EXP. 62,312 [85.27%]`), matched against the digit templates in `statusbar_glyphs.npz`. That number is the game's own total, so kills, the yellow *Bonus EXP for PARTY* line and quest EXP all count, exactly once. On a level-up, the EXP left in the old level is added on; EXP lost on death isn't subtracted. A reading only counts when it repeats and agrees with the percentage, so a misread is ignored. Switching characters (with the character-select gap in between) starts fresh instead of counting a fake level-up.
-- **Mesos** come from the white `You have gained mesos (+N)` messages at the bottom right. Text is picked out from any map by looking for bright pixels with the game's dark drop shadow, so faded and yellow lines drop out on their own. Lines are read with Windows' built-in OCR, followed as the stack scrolls up, and each one counts once its amount has read the same twice.
-- **Character names** are read with the same OCR from the status bar, next to LV.
-- It only scans while the game window has focus. Pickups made while you're alt-tabbed aren't seen; EXP still catches up, because the status bar holds the total.
-- Its windows show up in your screenshots and recordings like any other window, so keep the overlay and tracker window off the status bar's EXP number, the bottom-right message area and your potion slots (the overlay warns you in red if one covers them). "Hide from screenshots" in SETTINGS lets them sit anywhere, but then they're also invisible to OBS, Discord and the Snipping Tool.
+### How it reads the game
 
-## Install
+- **EXP:** the number on the status bar (`EXP. 62,312 [85.27%]`), matched against digit templates. It's the game's own total, so kill EXP, party bonus EXP and quest EXP all count exactly once. A reading only counts when it repeats and agrees with the percentage.
+- **Mesos and pickups:** the messages at the bottom right, read with Windows' built-in OCR. Each message is followed as the stack scrolls up, so it's counted exactly once. Garbled or cut-off item names ("Animal Fur Bun...") are matched to real item names, preferring items your current map drops.
+- **Potions:** the count on each quick slot, read on the game's own 1366x768 pixel grid. Only drops in the count are counted; a drop of more than 12 at once is treated as moving the stack.
+- It only reads while the game window is in front.
 
-Windows 10 or 11, with [Python](https://www.python.org/) 3.10 or newer, then:
+### Item and map data
 
-```
-python -m pip install mss numpy opencv-python pillow winrt-runtime winrt-Windows.Media.Ocr winrt-Windows.Graphics.Imaging winrt-Windows.Storage.Streams winrt-Windows.Globalization winrt-Windows.Foundation winrt-Windows.Foundation.Collections
-```
+Map names, item names, icons, NPC prices and monster drops come from [NiaDB](https://meowdb.com). Looked-up data is kept in `meowdb_cache/`. Online lookups are off by default (`"niadb_online"` in `tracker_config.json`); when on, MapleTracker asks for at most one page every 10 seconds and stops if NiaDB refuses. Pages saved from meowdb.com with Ctrl+S into `meowdb_import/` are imported too.
 
-Windows OCR needs an English language pack (Settings > Time & language > Language).
+### Files and settings
 
-## Tuning / troubleshooting
+- `tracker_config.json`: screen positions (in game units, measured on a 2560x1440 window), overlay and window size (`overlay_scale`, `window_scale`), and `native_size` if your game doesn't render at 1366x768.
+- `profiles/`: each character's logs and potions. `prices.json`: your item prices.
+- `python maple_tracker.py --debug` logs every EXP change, pickup and potion use to `tracker_log.txt`.
+- `tools/build_glyphs.py` and `tools/build_count_glyphs.py` rebuild the digit templates from labelled recordings (not included, as they show other players' names and chat).
 
-`tracker_config.json` (created on first run) sets screen positions in game units (screen px / (game height / 768)), measured on a 2560x1440 game window: `exp_text` (the EXP number, from the bottom-centre), `msg_area` (the pickup messages, from the bottom-right), `name_text` (the character name) and `quickslots` (the quick-slot grid).
-
-- `python maple_tracker.py --debug` logs every EXP change, meso pickup and potion use to `tracker_log.txt`.
-- `python tools/build_glyphs.py` rebuilds the status bar digits, and `python tools/build_count_glyphs.py` the quick-slot digits. Both need labelled screen recordings in `captures/`, which aren't included in this repository (they contain other players' names and chat).
+</details>
 
 ## Credits
 
-- Map, monster and item data (item IDs, icons, NPC prices): [NiaDB](https://meowdb.com), used with permission. MapleTracker caches what it looks up and asks NiaDB for at most one page every 10 seconds.
+- Map, monster and item data: [NiaDB](https://meowdb.com), used with permission.
 - MapleStory is a trademark of NEXON. MapleTracker is a fan-made tool and isn't affiliated with NEXON or NiaDB.
 
 ## License
 
 [MIT](LICENSE)
-
