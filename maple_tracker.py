@@ -50,6 +50,7 @@ DEFAULTS = {
     "opacity": 0.9,
     "hide_when_game_not_focused": True,
     "close_with_game": True,        # quit when MapleStory closes (after close_after_s seconds)
+    "pause_on_portal": False,       # pause the session when the screen fades out for a map change
     "close_after_s": 10,
     "debug": False,                 # print every reading / message to the console
     "hide_from_screenshots": False, # True: leave our windows out of ALL screen capture (yours too:
@@ -940,6 +941,63 @@ def blank_quickslots(img, left, top, rect, s, cfg):
     if bx1 > 0 and by1 > 0 and bx0 < w and by0 < h:
         img[max(0, by0):min(h, by1), max(0, bx0):min(w, bx1)] = 0
     return img
+
+
+class PortalWatch:
+    """Notices the fade to black of a map change (portal, town scroll, channel change).
+
+    The whole picture fades out and back in within about a second, the status bar included, and
+    is fully black for as little as 0.04 s. So two thin lines are checked about 20 times a second
+    on a thread of their own (a slow OCR pass can't make it miss one): one through the scenery,
+    one through the status bar. A portal is both at under 45% of their usual brightness at once.
+    A dark map can't trigger it (its status bar stays lit), nor can a bright flash.
+    Only screenshots: nothing is sent to the game."""
+    DIM, CALM, EVERY, COOLDOWN = 0.45, 0.7, 0.05, 1.0
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.rect = None              # the game's client area while watching, else None
+        self.fired = False            # set on a fade; the Tk side clears it
+        self.base = None
+        self.last = float("-inf")    # when the screen was last seen faded
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        sct = mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+        while True:
+            rect = self.rect
+            if rect is None or rect[2] < 64 or rect[3] < 64:
+                self.base = None
+                time.sleep(0.2)
+                continue
+            try:
+                self._check(sct, rect)
+            except Exception as ex:
+                log("portal watch:", repr(ex))
+                time.sleep(1.0)
+            time.sleep(self.EVERY)
+
+    def _line(self, sct, x, y, w):
+        px = np.asarray(sct.grab({"left": int(x), "top": int(y), "width": int(w), "height": 2}))
+        return float(px[:, ::4, :3].mean())
+
+    def _check(self, sct, rect):
+        cx, cy, cw, ch = rect
+        s = ui_scale(rect, self.cfg)
+        scene = self._line(sct, cx, cy + ch // 3, cw)
+        bar = self._line(sct, cx, cy + ch - max(3, int(12 * s)), cw)
+        if self.base is None or self.base[2] != (cw, ch):
+            self.base = [scene, bar, (cw, ch)]
+            return
+        r1, r2 = scene / max(1.0, self.base[0]), bar / max(1.0, self.base[1])
+        if r1 < self.DIM and r2 < self.DIM and min(self.base[:2]) > 25:
+            now = time.monotonic()
+            if now - self.last > self.COOLDOWN:
+                self.fired = True
+            self.last = now
+        elif r1 > self.CALM and r2 > self.CALM:
+            self.base[0] = 0.9 * self.base[0] + 0.1 * scene
+            self.base[1] = 0.9 * self.base[1] + 0.1 * bar
 
 
 def native_size(rect, cfg):
@@ -3331,10 +3389,11 @@ class TrackerWindow(MapleWindow):
         key = (self.hover, self.sliding,
                json.dumps({k: app.cfg.get(k) for k in ("trackers", "profit", "exp_display", "underlay",
                                                        "underlay_opacity", "auto_profile",
-                                                       "close_with_game", "hide_from_screenshots")}, sort_keys=True))
+                                                       "close_with_game", "hide_from_screenshots",
+                                                       "pause_on_portal")}, sort_keys=True))
         cache = getattr(self, "_set_cache", None)
         if cache is None or cache[0] != key:
-            layer = Image.new("RGBA", (W, u(460)), (0, 0, 0, 0))
+            layer = Image.new("RGBA", (W, u(560)), (0, 0, 0, 0))
             before = {"b": set(self.buttons), "s": set(self.sliders)}
             total = self._settings_body(layer, u(3)) + u(4)
             made = {"b": {n: v for n, v in self.buttons.items() if n not in before["b"]},
@@ -3465,6 +3524,10 @@ class TrackerWindow(MapleWindow):
         toggle("o_auto", y, "Switch character automatically",
                "Reads your character's name on the status bar and switches to their profile.",
                app.cfg.get("auto_profile"), lambda: app.set_option("auto_profile", not app.cfg.get("auto_profile")))
+        y += u(26)
+        toggle("o_portal", y, "Pause on portal",
+               "Pauses the session when the screen fades out for a map change. Press play to carry on.",
+               app.cfg.get("pause_on_portal"), lambda: app.set_option("pause_on_portal", not app.cfg.get("pause_on_portal")))
         y += u(26)
         toggle("o_close", y, "Close with the game", "Quit MapleTracker when MapleStory closes (and save the session).",
                app.cfg.get("close_with_game"), lambda: app.set_option("close_with_game",
@@ -3979,6 +4042,7 @@ class App:
         self.regions = {}               # screen areas being read: name -> (x0, y0, x1, y1)
         self._name_cand, self._name_n = None, 0
         self.sct = mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+        self.portal = PortalWatch(cfg)
         self.root = tk.Tk()
         self.root.withdraw()
         self.overlay = Overlay(self)
@@ -4037,10 +4101,10 @@ class App:
         se.state = RUNNING
         self.after_change()
 
-    def pause(self):
+    def pause(self, why=""):
         if self.session.state == RUNNING:
             self.session.state = PAUSED
-            log("paused")
+            log("paused" + (f" ({why})" if why else ""))
             self.after_change()
 
     def toggle(self):
@@ -4776,6 +4840,12 @@ class App:
             self.after_change()
         fg = user32.GetForegroundWindow()
         game_front = bool(hwnd) and fg == hwnd and not user32.IsIconic(hwnd)
+        watch = game_front and se.running and self.cfg.get("pause_on_portal")
+        self.portal.rect = client_rect(hwnd) if watch else None
+        if self.portal.fired:
+            self.portal.fired = False
+            if watch:
+                self.pause("map change")
         if hwnd and not self.overlay._placed:
             self.overlay.place(hwnd)
         if game_front:
