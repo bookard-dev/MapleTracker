@@ -4386,8 +4386,6 @@ class App:
         for w in (self.prompt, self.catalog, self.map_win, self.controls):
             if w is not None:
                 w.close()
-        if self._hk_thread_id:
-            user32.PostThreadMessageW(self._hk_thread_id, 0x0012, 0, 0)
         self.root.destroy()
 
     # --- reading the game
