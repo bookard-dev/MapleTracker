@@ -1,9 +1,24 @@
 # MapleTracker
 
-EXP, meso, potion and profit tracker overlay for MapleStory Classic.
+EXP, meso, loot, potion and profit tracker overlay for MapleStory Classic.
+
+<p align="center"><img src="docs/overlay.png" alt="The overlay over the game: map, EXP per hour with a level gauge, mesos, potions used, loot and profit"></p>
 
 **Start:** double-click `Start MapleTracker.bat`. It closes by itself when MapleStory closes.
 It only takes screenshots and is read-only: no memory reading, nothing injected, no input sent to the game.
+
+## At a glance
+
+| | |
+|---|---|
+| ![Tracker tab](docs/tracker.png) | ![Loot tab](docs/loot.png) |
+| **TRACKER:** the session you're hunting - EXP, mesos, loot, potions, profit, start / pause / stop | **LOOT:** what you picked up and what it's worth at your prices (or the NPC's), included in profit or not |
+| ![Potions tab](docs/potions.png) | ![Log tab](docs/log.png) |
+| **POTIONS:** drag each potion onto your own quick slot; each use is counted from the number on it | **LOG:** every session saved per map and per character, with EXP/h and profit/h |
+| ![Choosing the map](docs/map_search.png) | ![Settings tab](docs/settings.png) |
+| **MAP:** type part of a map's name and pick it | **SETTINGS:** pick which trackers run and what profit counts |
+
+<sub>The pictures use made-up sample data.</sub>
 
 | | |
 |---|---|
@@ -39,8 +54,25 @@ It only takes screenshots and is read-only: no memory reading, nothing injected,
   - Each character has its own potions.
 - **How usage is counted:** it reads the item count on each potion's quick slot, and only *drops* in the count are counted. A drop or a purchase raises the count, and that just becomes the new starting point. So 80 → 75 → (loot) 76 → 70 counts 5 + 6 = 11 used.
 - A big drop all at once (more than 12) is assumed to be moving, dropping or selling the stack, so it isn't counted.
-- **PROFIT** = mesos gained − potion cost. It's green when you're ahead and red when potions cost more than you picked up. It shows on the overlay, the TRACKER tab and every log entry.
-- **SETTINGS tab:** switch the EXP, Mesos and Potions trackers on or off independently; profit needs both Mesos and Potions. Also here: close with the game, and hide from screenshots.
+- **PROFIT** = mesos gained + the loot that counts − potion cost. It's green when you're ahead and red when you spent more than you made. It shows on the overlay, the TRACKER tab and every log entry, whenever at least two of Mesos, Loot and Potions are on.
+- **SETTINGS tab:** switch the EXP, Mesos, Loot and Potions trackers on or off independently, choose what PROFIT counts (Etc items, Equips, Scrolls, Use items, Setup items, and whether looted potions are free), and set the options below.
+
+## Loot and prices
+
+- **Pickups** ("Gold Ore x1 earned. (Etc)") are read from the same messages as mesos. Names the OCR garbles or the game cuts short ("Animal Fur Bun...") are matched to the real item names, and junk that matches no item is ignored.
+- **LOOT tab:** this session's pickups first, then everything in your price book (search with FIND).
+  - **Click a price** to set what an item is worth to you: `2500`, `25k` or `1.5m`, or leave it empty for the NPC sell-back price. Scrolls default to 1 meso.
+  - **Untick** an item to leave it out of PROFIT. You can also switch whole kinds off in SETTINGS.
+  - Prices are shared by all your characters and saved in `prices.json`.
+- **Looted potions are free:** a potion you've set up on the POTIONS tab is valued at its own price when you loot it, so drinking it later evens out instead of counting as a loss. Turn this off in SETTINGS.
+
+## Choosing the map
+
+Type in the **MAP** box and a list of matching maps drops down (towns left out, your recent maps first): Up/Down and Enter, or click. Anything you type still works as a map name.
+
+## NiaDB data
+
+The map list, item names, icons and NPC prices come from [NiaDB](https://meowdb.com). What's been looked up is saved in `meowdb_cache/`. New lookups (`"niadb_online": true` in the config) are off until NiaDB has approved the tool. When on, MapleTracker asks for at most one page every 10 seconds, one at a time, and stops if NiaDB says no (429 / 403).
 
 The count digits are read on the game's own pixel grid. The game draws at 1366x768 and stretches that to the window, so each count corner is shrunk back exactly. There, every digit is the same crisp pixel-font shape wherever it sits (1xx, 5xx and 999 alike); set `native_size` in the config if your game uses another resolution. The digit templates in `count_glyphs.npz` are built by `tools/build_count_glyphs.py` from labelled recordings (`captures/qs*`, `captures/extra_labels.json`):
 
