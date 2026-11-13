@@ -3424,120 +3424,126 @@ class TrackerWindow(MapleWindow):
                                           lambda v: setattr(self, "scroll", int(v * (total - vh))), None)
 
     def _settings_body(self, img, y):
-        """Draws the settings from y down; -> where they end."""
+        """Draws the settings from y down as game-style panels; -> where they end."""
         W, u, app = self.Wp, self.u, self.app
         W -= u(8)                               # room for the scroll bar
         d = ImageDraw.Draw(img)
-        st = max(1, u(1.1))
         on = app.cfg["trackers"]
+        INK, DIM, HOVER = (29, 43, 69), (92, 108, 134), (214, 228, 244)
+        x0, x1 = u(8), W - u(4)                 # a panel's edges
+        lx, cx = u(18), u(98)                   # label column, controls column
 
-        def heading(text, yy):
-            d.text((u(12), yy + u(11)), text, font=font("black", u(9.5)), fill=WHITE, anchor="ls",
-                   stroke_width=st, stroke_fill=(38, 62, 96))
+        def panel(title, yy, rows_h):
+            """A light panel with a title strip; -> where its contents start."""
+            d.rounded_rectangle((x0, yy, x1, yy + u(17) + rows_h + u(5)), radius=u(4),
+                                fill=(240, 246, 252), outline=(112, 140, 180))
+            d.rounded_rectangle((x0 + 1, yy + 1, x1 - 1, yy + u(16)), radius=u(4), fill=(208, 224, 242))
+            d.line([(x0 + 1, yy + u(16)), (x1 - 1, yy + u(16))], fill=(160, 184, 214))
+            d.text((x0 + u(8), yy + u(11.5)), title, font=font("black", u(8.4)), fill=(34, 58, 104), anchor="ls")
+            return yy + u(19)
 
-        def toggle(name, yy, title, desc, value, action):
-            box = (u(12), yy, W - u(12), yy + u(25))
-            hov = self.hover == name
-            if hov:
-                d.rounded_rectangle(box, radius=u(3), fill=(170, 200, 216))
-            checkbox(d, u(18), yy + u(6), u(13), value, hov)
-            d.text((u(38), yy + u(12)), title, font=font("bold", u(9.4)), fill=WHITE, anchor="ls",
-                   stroke_width=st, stroke_fill=(38, 62, 96))
-            d.text((u(38), yy + u(23)), desc, font=font("reg", u(7.8)), fill=(30, 50, 84), anchor="ls")
+        def hover_box(name, box):
+            if self.hover == name:
+                d.rounded_rectangle(box, radius=u(3), fill=HOVER)
+
+        def check(name, x, yy, w, title, value, action, note=None):
+            """A checkbox with its title (and a short grey note after it)."""
+            box = (x, yy, x + w, yy + u(16))
+            hover_box(name, box)
+            checkbox(d, x + u(4), yy + u(2.5), u(11), value, self.hover == name)
+            end = x + u(19)
+            d.text((end, yy + u(11.5)), title, font=font("bold", u(8.6)), fill=INK, anchor="ls")
+            if note:
+                tw = d.textlength(title, font=font("bold", u(8.6)))
+                d.text((end + tw + u(7), yy + u(11.5)), note, font=font("reg", u(7.8)), fill=DIM, anchor="ls")
             self.buttons[name] = (box, action)
-
-        def small(name, x, yy, w, title, value, action):
-            box = (x, yy, x + w, yy + u(17))
-            hov = self.hover == name
-            if hov:
-                d.rounded_rectangle(box, radius=u(3), fill=(170, 200, 216))
-            checkbox(d, x + u(4), yy + u(3), u(11), value, hov)
-            d.text((x + u(19), yy + u(12)), title, font=font("bold", u(8.6)), fill=WHITE, anchor="ls",
-                   stroke_width=st, stroke_fill=(38, 62, 96))
-            self.buttons[name] = (box, action)
-
-        heading("TRACKERS", y)
-        y += u(15)
-        cw = (W - u(24)) / 4
-        for i, (k, title) in enumerate((("exp", "EXP"), ("meso", "Mesos"), ("loot", "Loot"), ("potions", "Potions"))):
-            small(f"t_{k}", u(12) + i * cw, y, cw - u(4), title, on.get(k),
-                  (lambda kk=k: app.set_tracker(kk, not app.cfg["trackers"].get(kk))))
-        y += u(20)
-        heading("PROFIT COUNTS", y)
-        y += u(15)
-        prof = app.cfg["profit"]
-        cw = (W - u(24)) / 3
-        for i, (k, title) in enumerate((("etc", "Etc items"), ("equip", "Equips"), ("scroll", "Scrolls"),
-                                        ("use", "Use items"), ("setup", "Setup items"),
-                                        ("free_potions", "Looted potions free"))):
-            r, c = divmod(i, 3)
-            small(f"p_{k}", u(12) + c * cw, y + r * u(18), cw - u(4), title, prof.get(k, True),
-                  (lambda kk=k: app.set_profit(kk, not app.cfg["profit"].get(kk, True))))
-        y += u(37)
-        d.text((u(14), y + u(6)), "PROFIT = mesos + loot that counts - potions. Loot is priced on the LOOT tab.",
-               font=font("bold", u(7.8)), fill=(34, 56, 92), anchor="ls")
-        y += u(10)
-        heading("OVERLAY", y)
-        y += u(15)
 
         def choice(name, x, yy, w, title, chosen, action):
             box = (x, yy, x + w, yy + u(15))
             hov = self.hover == name
-            top, bot = ((96, 172, 240), (30, 96, 170)) if chosen else ((246, 248, 252), (200, 208, 220))
+            top, bot = ((96, 172, 240), (30, 96, 170)) if chosen else ((252, 253, 255), (212, 220, 232))
             if hov:
                 top, bot = shade(top, 0.12), shade(bot, 0.12)
-            d.rounded_rectangle(box, radius=u(3), fill=bot, outline=(40, 60, 96))
+            d.rounded_rectangle(box, radius=u(3), fill=bot, outline=(70, 96, 136))
             d.rounded_rectangle([box[0] + 1, box[1] + 1, box[2] - 1, (box[1] + box[3]) / 2], radius=u(3), fill=top)
             d.text(((box[0] + box[2]) / 2, yy + u(11)), title, font=font("bold", u(8)),
-                   fill=WHITE if chosen else (40, 56, 84), anchor="ms",
-                   stroke_width=st if chosen else 0, stroke_fill=(20, 50, 100))
+                   fill=WHITE if chosen else INK, anchor="ms",
+                   stroke_width=max(1, u(1.1)) if chosen else 0, stroke_fill=(20, 50, 100))
             self.buttons[name] = (box, action)
 
-        def label(text, yy):
-            d.text((u(14), yy + u(11)), text, font=font("bold", u(8.6)), fill=WHITE, anchor="ls", stroke_width=st,
-                   stroke_fill=(38, 62, 96))
+        def label(text, yy, colour=INK):
+            d.text((lx, yy + u(11)), text, font=font("bold", u(8.6)), fill=colour, anchor="ls")
 
+        # TRACKING: what is counted at all
+        y = panel("TRACKING", y, u(16))
+        cw = (x1 - x0 - u(16)) / 4
+        for i, (k, title) in enumerate((("exp", "EXP"), ("meso", "Mesos"), ("loot", "Loot"), ("potions", "Potions"))):
+            check(f"t_{k}", x0 + u(8) + i * cw, y, cw - u(4), title, on.get(k),
+                  (lambda kk=k: app.set_tracker(kk, not app.cfg["trackers"].get(kk))))
+        y += u(16) + u(5) + u(7)
+
+        # OVERLAY: how it looks
+        y = panel("OVERLAY", y, u(54))
         label("EXP shows", y)
         mode = app.cfg.get("exp_display", "exp")
         for i, (k_, title) in enumerate((("exp", "EXP / h"), ("pct", "% / h"), ("both", "Both"))):
-            choice(f"x_{k_}", u(80) + i * u(54), y, u(50), title, mode == k_,
+            choice(f"x_{k_}", cx + i * u(54), y, u(50), title, mode == k_,
                    lambda kk=k_: app.set_value("exp_display", kk))
         y += u(19)
         label("Background", y)
         style = app.cfg.get("underlay", "off")
         for i, (k_, title) in enumerate((("off", "Off"), ("light", "Light"), ("dark", "Dark"))):
-            choice(f"u_{k_}", u(80) + i * u(38), y, u(35), title, style == k_,
+            choice(f"u_{k_}", cx + i * u(54), y, u(50), title, style == k_,
                    lambda kk=k_: app.set_value("underlay", kk))
-        # opacity: 0% ---[]--- 100%
-        sx0, sx1 = u(214), W - u(36)
+        y += u(19)
+        live = style != "off"
+        label("Opacity", y, INK if live else (150, 162, 182))
         op = float(app.cfg.get("underlay_opacity", 0.55))
-        dim = (34, 56, 92) if style != "off" else (110, 128, 150)
-        d.text((sx0 - u(5), y + u(11)), "0%", font=font("bold", u(7.8)), fill=dim, anchor="rs")
-        d.text((sx1 + u(5), y + u(11)), "100%", font=font("bold", u(7.8)), fill=dim, anchor="ls")
+        sx0, sx1 = cx + u(4), x1 - u(40)
         tb = (sx0, y + u(4), sx1, y + u(11))
         slider(d, tb, op, self.k, self.sliding == "u_op")
+        d.text((sx1 + u(8), y + u(11)), f"{int(round(op * 100))}%", font=font("bold", u(8)),
+               fill=INK if live else (150, 162, 182), anchor="ls")
         self.sliders["u_op"] = (tb, lambda v: app.set_value("underlay_opacity", round(v, 2), save=False),
                                 lambda: app.set_value("underlay_opacity", app.cfg["underlay_opacity"]))
-        y += u(21)
-        heading("OPTIONS", y)
-        y += u(15)
-        toggle("o_auto", y, "Switch character automatically",
-               "Reads your character's name on the status bar and switches to their profile.",
-               app.cfg.get("auto_profile"), lambda: app.set_option("auto_profile", not app.cfg.get("auto_profile")))
-        y += u(26)
-        toggle("o_portal", y, "Pause on portal",
-               "Pauses the session when the screen fades out for a map change. Press play to carry on.",
-               app.cfg.get("pause_on_portal"), lambda: app.set_option("pause_on_portal", not app.cfg.get("pause_on_portal")))
-        y += u(26)
-        toggle("o_close", y, "Close with the game", "Quit MapleTracker when MapleStory closes (and save the session).",
-               app.cfg.get("close_with_game"), lambda: app.set_option("close_with_game",
-                                                                      not app.cfg.get("close_with_game")))
-        y += u(26)
-        toggle("o_hide", y, "Hide from screenshots",
-               "Leaves MapleTracker out of ALL screen capture (yours too: OBS, Discord, Snipping Tool).",
-               app.cfg.get("hide_from_screenshots"),
-               lambda: app.set_option("hide_from_screenshots", not app.cfg.get("hide_from_screenshots")))
-        return y + u(26)
+        y += u(16) + u(5) + u(7)
+
+        # SESSION: what happens on its own
+        y = panel("SESSION", y, u(3 * 18 - 2))
+        wide = x1 - x0 - u(12)
+        for name, key, title, note in (
+                ("o_portal", "pause_on_portal", "Pause on portal", "when you change maps"),
+                ("o_auto", "auto_profile", "Switch character automatically", "from the name on your status bar"),
+                ("o_close", "close_with_game", "Close with the game", "and save the session")):
+            check(name, x0 + u(6), y, wide, title, app.cfg.get(key),
+                  (lambda kk=key: app.set_option(kk, not app.cfg.get(kk))), note)
+            y += u(18)
+        y += u(-2) + u(5) + u(7)
+
+        # PROFIT: which loot counts
+        prof = app.cfg["profit"]
+        y = panel("PROFIT", y, u(16 + 18 + 18 + 11))
+        cw = (x1 - x0 - u(16)) / 3
+        for i, (k, title) in enumerate((("etc", "Etc items"), ("use", "Use items"), ("equip", "Equips"),
+                                        ("scroll", "Scrolls"), ("setup", "Setup items"))):
+            r, c = divmod(i, 3)
+            check(f"p_{k}", x0 + u(8) + c * cw, y + r * u(18), cw - u(4), title, prof.get(k, True),
+                  (lambda kk=k: app.set_profit(kk, not app.cfg["profit"].get(kk, True))))
+        y += u(36)
+        check("p_free_potions", x0 + u(6), y, wide, "Looted potions are free", prof.get("free_potions", True),
+              (lambda: app.set_profit("free_potions", not app.cfg["profit"].get("free_potions", True))),
+              "drinking them doesn't cost you")
+        y += u(18)
+        d.text((lx, y + u(7)), "Profit = mesos + the loot ticked here - potions. Prices are on the LOOT tab.",
+               font=font("reg", u(7.6)), fill=DIM, anchor="ls")
+        y += u(11) + u(5) + u(7)
+
+        # PRIVACY
+        y = panel("PRIVACY", y, u(16))
+        check("o_hide", x0 + u(6), y, wide, "Hide from screenshots", app.cfg.get("hide_from_screenshots"),
+              (lambda: app.set_option("hide_from_screenshots", not app.cfg.get("hide_from_screenshots"))),
+              "also hides it from OBS and Discord")
+        return y + u(16) + u(5)
 
     def draw_loot(self, img):
         """This session's pickups first, then everything else in your price book: price (click to
