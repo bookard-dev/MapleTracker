@@ -12,9 +12,8 @@ MapleTracker - EXP and meso tracker overlay for MapleStory (Classic).
 It only takes screenshots of the game window. It never reads game memory, injects anything, or sends
 input to the game. Its own windows are excluded from screenshots, so they never confuse the reader.
 
-Hotkeys (work while the game has focus; nothing is sent to the game):
-  Alt+F6     open the tracker window (totals, per hour, reset buttons)
-Mouse: drag the overlay to move it; right-click it for the tracker window.
+No hotkeys, no keyboard hooks: the overlay's own buttons (gear = tracker window, play / pause,
+stop) do it. Mouse: drag the overlay to move it; right-click it for the tracker window too.
 """
 import asyncio
 import html
@@ -36,6 +35,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+OPEN_FLAG = os.path.join(HERE, "open_window.flag")     # left by a second start: open the window
 CONFIG_PATH = os.path.join(HERE, "tracker_config.json")
 STATE_PATH = os.path.join(HERE, "tracker_state.json")
 GLYPHS_PATH = os.path.join(HERE, "statusbar_glyphs.npz")
@@ -74,7 +74,11 @@ DEFAULTS = {
     "last_map": "",
     "controls_geometry": None,      # tracker window position
     "window_tab": "tracker",
-    "log_expanded": [],             # maps opened on the LOG tab
+    "log_expanded": [],
+    "overlay_loot_open": False,
+    "underlay": "off",              # a panel behind the overlay text: "off", "light" or "dark"
+    "underlay_opacity": 0.55,       # 0..1, set with the slider on the SETTINGS tab
+    "exp_display": "exp",           # the overlay's EXP rate: "exp" (EXP/h), "pct" (level %/h) or "both"     # the overlay's loot grid (click LOOT on the overlay)             # maps opened on the LOG tab
     # where things are on screen, in game units (screen px / (client height / 768)):
     # EXP number on the status bar, measured from the bottom-centre of the game
     "exp_text": {"dx0": 62, "dx1": 172, "dy0": 31, "dy1": 20},
@@ -270,7 +274,8 @@ class ExpReader:
                 toks.append("[")            # [ or ], told apart by position below
                 continue
             if h < 0.45 * dh:
-                toks.append("," if h > 0.21 * dh else ".")
+                # comma ~0.29, point ~0.21 of a digit's height (a point sits on the old 0.21 line)
+                toks.append("," if h > 0.25 * dh else ".")
                 continue
             if h < 0.75 * dh or w > 1.25 * dh:
                 toks.append("?")            # half a glyph, or two that touch: never guessed
@@ -278,7 +283,7 @@ class ExpReader:
             ch, dist = self.classify(m[y0:y1, x0:x1])
             toks.append(ch if dist <= 0.17 else "?")
         text = "".join(toks)
-        mt = re.search(r"\|?[.,]*([\d,]+)\[(\d{1,3})\.(\d\d)%\[", text)
+        mt = re.search(r"\|?[.,]*([\d,]+)\[(\d{1,3})[.,](\d\d)%\[", text)   # "11.93%": a point, never a comma
         if not mt:
             return None
         num = mt.group(1)
@@ -482,7 +487,8 @@ def meso_amount(text):
 
 
 # "Gold Ore x1 earned. (Etc)" - OCR often garbles the "x1" ("Kl", "gl", "B.I") and the brackets
-EARNED_RE = re.compile(r"\s([ea][ae]?r[rnm][a-z.\]\[|]{0,5})\s*(\(.*)?$", re.I)
+EARNED_RE = re.compile(r"\s([eabgp]?[ae]?[ae]?[rm][rnm]?[a-z.\]\[|}\-'\"æ ]{0,6}?\.?)\s*"
+                       r"((?:\(|\{|OJ|0-|I-I).{0,8})?$", re.I)
 QTY_JUNK = {"kl", "ki", "gl", "gi", "hi", "hl", "b.i", "v.i", "r.l", "xl", "xi", "x|", "{1", "(1", "ri", "yi", "y1"}
 CATS = {"e": "Etc", "u": "Use", "s": "Setup", "q": "Equip"}
 
@@ -497,19 +503,32 @@ def item_pickup(text):
         return None
     name = text[:m.start()].strip()
     qty = 1
+    # "x14" read as "Kl 4" / "x1 4": a garbled x1 followed by the rest of the number
+    m14 = re.search(r"\s(\S{0,3}[1lI|])\s(\d{1,3})$", name)
+    if m14 and re.search(r"[^A-Za-z]|^[xXKkRrBbgHhVY][lI1]$", m14.group(1)):
+        name = name[:m14.start()] + " x1" + m14.group(2)
     parts = name.rsplit(" ", 1)
     if len(parts) == 2:
         tok = parts[1].strip()
-        if re.fullmatch(r"[xX×]?[0-9lI|]{1,3}", tok) and re.search(r"\d", tok):
+        m12 = re.fullmatch(r"([^\s]{0,3}?)[1lI|](\d{1,2})", tok)
+        if m12 and not re.fullmatch(r"[xX×]?\d{1,3}", tok) and (re.search(r"[^A-Za-z]", m12.group(1))
+                                                                 or re.fullmatch(r"[A-Za-z]?", m12.group(1))):
+            qty = int("1" + m12.group(2))
+            name = parts[0]
+        elif re.fullmatch(r"[xX×]?[0-9lI|]{1,3}", tok) and re.search(r"\d", tok):
             qty = int(re.sub(r"\D", "", tok.replace("l", "1").replace("I", "1").replace("|", "1")) or 1)
             name = parts[0]
-        elif tok.lower() in QTY_JUNK or (len(tok) <= 3 and re.fullmatch(r"[xX][^A-Za-z]{0,2}", tok)):
+        elif tok.lower() in QTY_JUNK or (len(tok) <= 3 and re.fullmatch(r"[xX][^A-Za-z]{0,2}", tok))                 or (len(tok) <= 5 and re.fullmatch(r"[^\s]{0,4}[1lI|]", tok) and re.search(r"[^A-Za-z]", tok))                 or re.fullmatch(r"[A-Z][lI1]", tok):
             name = parts[0]
     cat = None
     if m.group(2):
         c = re.sub(r"[^a-z]", "", m.group(2).lower())
         if c.startswith("eq"):
             cat = "Equip"
+        elif re.search(r"se|sa|ilse|ijse", c) and not c.startswith("et"):
+            cat = "Use"
+        elif c.startswith("se"):
+            cat = "Setup"
         elif c:
             cat = CATS.get(c[0])
     name = re.sub(r"^[^A-Za-z0-9]+", "", name)          # stray marks before the name
@@ -554,6 +573,31 @@ class MessageReader:
                 best, best_d = cost, d
         return best_d
 
+    def read_lines(self, bgr, s):
+        """-> (lines [(y, text)] top to bottom, how far the stack scrolled up since the last frame
+        in px, whether there's any text at all)."""
+        k = max(1, int(round(s)))
+        m = text_mask(bgr, k)
+        half = cv2.resize(m.astype(np.float32), (m.shape[1] // 2, m.shape[0] // 2), interpolation=cv2.INTER_AREA)
+        half = cv2.GaussianBlur(half, (3, 3), 0)
+        lh = DEFAULTS["msg_line_h"] * s
+        d = 2 * self._shift(half, int(5 * lh / 2))
+        self.prev = half
+        if not m.any():
+            return [], d, False
+        up = max(1.0, 1.875 / s)
+        mm = cv2.dilate(m.astype(np.uint8), np.ones((2, 2), np.uint8))
+        img = np.where(mm > 0, 0, 255).astype(np.uint8)
+        if up > 1.0:
+            img = cv2.resize(img, None, fx=up, fy=up, interpolation=cv2.INTER_LINEAR)
+        img = cv2.copyMakeBorder(img, self.PAD, self.PAD, self.PAD, self.PAD, cv2.BORDER_CONSTANT, value=255)
+        found = []
+        for text, x, y, w, h in self.ocr.lines(img):
+            y = (y - self.PAD) / up
+            if h / up >= 0.4 * lh:
+                found.append((y, text))
+        return sorted(found), d, True
+
     def update(self, bgr, s, now):
         """-> list of meso amounts that newly arrived."""
         if self.ocr.engine is None:
@@ -569,8 +613,7 @@ class MessageReader:
         for t in self.tracks:
             t["y"] -= d
         if not m.any():
-            self._expire(now, lh)
-            return []
+            return self._expire(now, lh)
         # OCR wants text ~20 px high; the game's is ~11 game units
         up = max(1.0, 1.875 / s)
         mm = cv2.dilate(m.astype(np.uint8), np.ones((2, 2), np.uint8))
@@ -603,23 +646,187 @@ class MessageReader:
                 if pick is None:
                     continue
                 name, qty, cat = pick
-                name = self.canon(name)
+                raw = name
+                name = self.canon(raw)
+                if not name and " " in raw.rstrip(". "):
+                    name = self.canon(raw.rsplit(" ", 1)[0] + ("..." if raw.endswith("...") else ""))
                 if not name:
                     continue                  # OCR junk that matches no real item
-                key = ("item", name, qty, cat or "")
+                key = ("item", name, qty)
+                done = t.setdefault("done", set())
+                if "item" in t["counted"] and name not in done:
+                    # a different item on this line: the stack scrolled and this is a new message
+                    # (the scroll estimate lost its place). Start over on it, remembering what
+                    # this line already counted so a one-off misread can't count anything twice.
+                    old = t
+                    t = {"y": y, "seen": now, "votes": {}, "counted": set(), "text": text, "done": set(done)}
+                    self.tracks[self.tracks.index(old)] = t
+                if name in t["done"]:
+                    continue
+                if cat:
+                    t.setdefault("cats", {})[name] = cat
             # a line counts once per kind (mesos / item), once the same reading came up twice
             if key[0] in t["counted"]:
                 continue
             t["votes"][key] = t["votes"].get(key, 0) + 1
             if t["votes"][key] >= 2:
                 t["counted"].add(key[0])
-                new.append(key)
-        self._expire(now, lh)
+                if key[0] == "item":
+                    t.setdefault("done", set()).add(key[1])
+                new.append(self._event(t, key))
+        new += self._expire(now, lh)
         return new
 
+    @staticmethod
+    def _event(t, key):
+        if key[0] == "item":
+            return ("item", key[1], key[2], t.get("cats", {}).get(key[1], ""))
+        return key
+
     def _expire(self, now, lh):
-        """Forget lines not seen for a while or pushed out of the top of the area."""
-        self.tracks = [t for t in self.tracks if now - t["seen"] < 8.0 and t["y"] > -lh]
+        """Forget lines not seen for a while or pushed out of the top of the area. A pickup line
+        that was read as a real item only once (it scrolled away fast) still counts then."""
+        keep, out = [], []
+        for t in self.tracks:
+            if now - t["seen"] < 8.0 and t["y"] > -lh:
+                keep.append(t)
+                continue
+            if "item" not in t["counted"] and not t.get("done"):
+                items = [(n, k) for k, n in t["votes"].items() if k[0] == "item"]
+                if items:
+                    out.append(self._event(t, max(items)[1]))
+        self.tracks = keep
+        return out
+
+
+class ItemFeed(MessageReader):
+    """Follows the message stack and reports each item pickup once.
+
+    New messages always appear in the bottom line and push the others up one line. Each line is
+    given a slot (lines above the bottom one) and a kind: EXP, mesos, an item (by name) or
+    unreadable. Lining this frame's slots up with the last frame's says how many messages were
+    pushed in since - the item names make that unambiguous, the measured scroll breaks ties - so
+    each message keeps its identity while it scrolls up, and is counted exactly once: when its
+    item name has read the same twice, or, if it only ever read once, when it leaves."""
+    MAX_SLOTS = 12
+
+    def __init__(self, ocr, canon=None):
+        super().__init__(ocr, canon)
+        self.y0 = None              # where the bottom line sits (px, in the strip)
+        self.slots = {}             # slot -> record {"votes", "qty", "cat", "counted", "seen", "sig"}
+
+    def _sig(self, text):
+        if meso_amount(text) is not None:
+            return ("meso",), None
+        if re.search(r"rec\S?i\S{0,4}d?\]?\s+E", text) or re.search(r"E\S?P", text) and "(+" in text:
+            return ("exp",), None
+        pick = item_pickup(text)
+        if pick is None:
+            return None, None
+        name, qty, cat = pick
+        canon = self.canon(name)
+        if not canon and " " in name.rstrip(". "):
+            canon = self.canon(name.rsplit(" ", 1)[0] + ("..." if name.endswith("...") else ""))
+        if not canon:
+            return None, None
+        return ("item", canon), (canon, qty, cat)
+
+    @staticmethod
+    def _best_qty(rec, name):
+        """The largest quantity read at least twice (a digit is more often lost than invented),
+        else the most common one."""
+        qtys = rec["qty"].get(name, {1: 1})
+        sure = [q for q, n in qtys.items() if n >= 2]
+        return max(sure) if sure else max(qtys, key=qtys.get)
+
+    def _event(self, rec):
+        name = max(rec["votes"], key=rec["votes"].get)
+        qty = self._best_qty(rec, name)
+        rec["name"], rec["sent"] = name, qty
+        return ("item", name, qty, rec["cat"].get(name, ""))
+
+    def update(self, bgr, s, now):
+        if self.ocr.engine is None:
+            return []
+        lh = DEFAULTS["msg_line_h"] * s
+        lines, d, any_text = self.read_lines(bgr, s)
+        out = []
+        if lines:
+            bottom = lines[-1][0]
+            if self.y0 is None or bottom > self.y0 + 0.5 * lh:
+                self.y0 = bottom
+            elif abs(bottom - self.y0) < 0.5 * lh:
+                self.y0 = 0.9 * self.y0 + 0.1 * bottom
+        cur = {}
+        for y, text in lines:
+            pos = (self.y0 - y) / lh
+            slot = int(round(pos))
+            if abs(pos - slot) > 0.3:
+                continue                    # caught mid-scroll, between two lines: wait for it to settle
+            if 0 <= slot <= self.MAX_SLOTS:
+                cur[slot] = self._sig(text)
+        # how many new messages pushed in: line the slots up with the last frame's
+        k_shift = int(round(d / lh))
+        best = None
+        for k in range(0, 6):
+            score = 0.0
+            for slot, (sig, _) in cur.items():
+                old = self.slots.get(slot - k)
+                if old is None or sig is None or old["sig"] is None:
+                    continue
+                score += 1.0 if old["sig"] == sig else -2.0
+            if k == 0 and 0 in cur and cur[0][0] is not None and self.slots.get(0) is not None                     and self.slots[0]["sig"] not in (None, cur[0][0]):
+                score -= 3.0                # what's in the bottom line changed: something new came in
+            score += (0.6 if k == k_shift else 0.0) - 0.5 * k     # new messages need evidence
+            if best is None or score > best[0] + 1e-9:
+                best = (score, k)
+        k = best[1] if self.slots else 0
+        moved = {}
+        for slot, rec in self.slots.items():
+            if slot + k <= self.MAX_SLOTS:
+                moved[slot + k] = rec
+            else:
+                out += self._leave(rec)
+        for slot, (sig, pick) in cur.items():
+            rec = moved.get(slot)
+            if rec is None or (slot < k):
+                rec = {"votes": {}, "qty": {}, "cat": {}, "counted": False, "seen": now, "sig": sig}
+                moved[slot] = rec
+            rec["seen"] = now
+            if sig is not None:
+                rec["sig"] = sig
+            if pick is not None and rec["counted"] and pick[0] == rec.get("name"):
+                # counted already: a clearer read of a bigger quantity adds the difference
+                q = rec["qty"].setdefault(pick[0], {})
+                q[pick[1]] = q.get(pick[1], 0) + 1
+                best = self._best_qty(rec, pick[0])
+                if best > rec.get("sent", best):
+                    out.append(("item", pick[0], best - rec["sent"], rec["cat"].get(pick[0], "")))
+                    rec["sent"] = best
+            if pick is not None and not rec["counted"]:
+                name, qty, cat = pick
+                rec["votes"][name] = rec["votes"].get(name, 0) + 1
+                rec["qty"].setdefault(name, {})[qty] = rec["qty"].get(name, {}).get(qty, 0) + 1
+                if cat:
+                    rec["cat"][name] = cat
+                if rec["votes"][name] >= 2:
+                    rec["counted"] = True
+                    out.append(self._event(rec))
+        # forget lines gone for a while (faded out)
+        self.slots = {}
+        for slot, rec in moved.items():
+            if now - rec["seen"] < (2.0 if any_text else 8.0) * (1 + slot / 4):
+                self.slots[slot] = rec
+            else:
+                out += self._leave(rec)
+        return out
+
+    def _leave(self, rec):
+        """A pickup read as a real item only once still counts when its line goes."""
+        if rec["counted"] or not rec["votes"]:
+            return []
+        rec["counted"] = True
+        return [self._event(rec)]
 
 
 # ----------------------------------------------------------------------------- potions (quick slots)
@@ -640,6 +847,7 @@ CATALOG = [
     (2020002, "Cake", 150, "HP+MP"), (2020013, "Red Bean Sundae", 2250, "HP+MP"),
 ]
 ICON_DIR = os.path.join(HERE, "icons")
+ICONS_ONLINE = False            # download missing icons (cdn.meowdb.com) - set from "niadb_online"
 COUNT_GLYPHS_PATH = os.path.join(HERE, "count_glyphs.npz")
 # quick slots are (column, row) in the 4 x 3 grid; their keys are each player's own
 
@@ -657,6 +865,8 @@ def item_icon(item_id):
         return _ICONS[item_id]
     path = os.path.join(ICON_DIR, f"{int(item_id)}.png")
     img = None
+    if not os.path.exists(path) and not ICONS_ONLINE:
+        return None                       # not saved, and not allowed to fetch it: no icon
     try:
         if not os.path.exists(path):
             import urllib.request
@@ -931,13 +1141,18 @@ def parse_drops(payload):
 
 def parse_item(payload, html_text):
     info = {}
-    m = re.search(r'"itemName":"([^"]+)","statRows":[^{}]*?"npcSellBack":\{"price":(\d+)', payload)
-    if m:
-        info["name"], info["npc"] = m.group(1), int(m.group(2))
+    name = re.search(r'"itemName":"([^"]+)"', payload)
+    if name:
+        info["name"] = name.group(1)
     else:
-        t = re.search(r"<title>(.*?) - MapleStory", html_text)
-        info["name"] = html.unescape(t.group(1)) if t else None
-        info["npc"] = None
+        title = re.search(r"<title>(.*?)(?: - MapleStory| \| NiaMeowDB)", html_text)
+        info["name"] = html.unescape(title.group(1)).strip() if title else None
+    # the NPC sell-back price: in the page's data (after any stat block), or else in its text
+    m = re.search(r'"npcSellBack":\{"price":(\d+)', payload)
+    if not m:
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html_text))
+        m = re.search(r"Sell-back(?: \(per unit\))? ([\d,]+) mesos", text)
+    info["npc"] = int(m.group(1).replace(",", "")) if m else None
     icon = re.search(r'"iconKey":"(\d+)"', payload)
     info["id"] = int(icon.group(1)) if icon else None
     info["equip"] = '"isEquip":true' in payload
@@ -945,6 +1160,181 @@ def parse_item(payload, html_text):
     info["category"] = cat.group(1) if cat else ""
     info["untradeable"] = '"children":"Untradeable"' in payload
     return info
+
+
+def parse_drops_html(html_text):
+    """A monster's drops from the page as the browser shows it (pages saved with Ctrl+S)."""
+    out, seen = [], set()
+    for page, icon, name, chance in re.findall(
+            r'href="/msclassic/item-db/(\d+)"><img src="https://cdn\.meowdb\.com/icons/(\d{7})\.png"[^>]*/?>\s*'
+            r'<span[^>]*>([^<]+)</span></a></td><td[^>]*>(?:<a[^>]*>)?([\d.]+%)', html_text):
+        if page not in seen:
+            seen.add(page)
+            out.append({"page": int(page), "id": int(icon), "name": html.unescape(name), "chance": chance})
+    return out
+
+
+def parse_classic_drops(html_text):
+    """The "Drops (MS Classic)" section of a monster page as the browser shows it: what players
+    have seen drop in MapleStory Classic, with their weighted votes (seen it / not). It has no drop
+    chances; the reference tables further down (MSEA, osmlib) are other versions' data."""
+    i = html_text.find("Drops (MS Classic)")
+    if i < 0:
+        return []
+    ends = [k for k in (html_text.find("MSEA reference drops", i), html_text.find("OSMLIB Reference", i)) if k > 0]
+    seg = html_text[i:min(ends) if ends else len(html_text)]
+    out, seen = [], set()
+    for m in re.finditer(r'href="[^"]*/msclassic/item-db/(\d+)"><img alt="([^"]*)"[^>]*src="[^"]*?(\d{7})[^"]*"', seg):
+        page, name, icon = m.groups()
+        if page in seen:
+            continue
+        seen.add(page)
+        row = seg[m.end():m.end() + 1500]
+        cat = re.search(r'title="[^"]*">[^<]*</div><div[^>]*>([^<]+)</div>', row)
+        up = re.search(r'▲</span><span[^>]*>([\d.]+)</span>', row)
+        down = re.search(r'▼</span><span[^>]*>([\d.]+)</span>', row)
+        out.append({"page": int(page), "id": int(icon), "name": html.unescape(name),
+                    "cat": html.unescape(cat.group(1)) if cat else "",
+                    "up": float(up.group(1)) if up else 0.0, "down": float(down.group(1)) if down else 0.0,
+                    "source": "MS Classic"})
+    out.sort(key=lambda d: d["down"] - d["up"])      # most-confirmed drops first
+    return out
+
+
+def parse_monsters_html(html_text):
+    out, seen = [], set()
+    for mid, name in re.findall(r'href="/msclassic/monsters/(\d+)"[^>]*>(?:\s*<[^>]+>)*\s*([^<]{2,40}?)\s*<', html_text):
+        if mid not in seen:
+            seen.add(mid)
+            out.append({"id": int(mid), "name": html.unescape(name), "count": 0})
+    return out
+
+
+MEOW_IMPORT_DIRS = [os.path.join(HERE, "meowdb_import"),
+                    os.path.join(os.path.expanduser("~"), "Downloads", "meowdb")]
+
+
+def parse_mob_locations(payload):
+    """The maps a monster lives in (from its page): [(map id, map name, how many)]."""
+    m = re.search(r'"locations":\[(.*?)\]\}', payload)
+    if not m:
+        return []
+    return [(mid, name, int(n)) for mid, name, n in
+            re.findall(r'\{"mapId":"(\d{9})","mapName":"([^"]+)","streetName":"[^"]*","count":(\d+)', m.group(1))]
+
+
+IMPORT_VERSION = 2          # bump when a parser changes, so saved pages are read again
+
+
+def import_saved_pages(folders=None):
+    """Pages you saved from meowdb.com in your own browser (Ctrl+S) -> the local cache, exactly as
+    if MapleTracker had looked them up. Nothing is fetched. When a map's own page isn't saved,
+    its monsters come from the monster pages (each lists the maps it lives in). Item icons in a
+    complete save's "_files" folder are kept too. -> [(kind, id, name or None, info)]"""
+    done, map_pages, from_mobs = [], set(), {}
+    pages = []
+    # pages already read (same size and time) are skipped: re-reading hundreds of MB on every
+    # MOBS click made it hang
+    seen_path = MeowDB._path("imported_pages")
+    seen = load_json(seen_path, {}) or {}
+    if seen.get("_version") != IMPORT_VERSION:
+        seen = {"_version": IMPORT_VERSION}
+    changed = False
+    for folder in folders or MEOW_IMPORT_DIRS:
+        if not os.path.isdir(folder):
+            continue
+        for root, dirs, files in os.walk(folder):    # subfolders too (e.g. an "items" folder)
+            # a complete save's "_files" folder: take its icons, don't walk into it
+            pages += [os.path.join(root, d) for d in sorted(dirs) if d.endswith("_files")]
+            dirs[:] = sorted(d for d in dirs if not d.endswith("_files"))
+            pages += [os.path.join(root, f) for f in sorted(files)]
+    for path in pages:
+        if os.path.isdir(path) and path.endswith("_files"):
+            for f in os.listdir(path):
+                mm = re.fullmatch(r"(\d{7})(?:_[A-Za-z0-9]+)?\.png", f)
+                dst = os.path.join(ICON_DIR, f"{mm.group(1)}.png") if mm else None
+                if dst and not os.path.exists(dst):
+                    os.makedirs(ICON_DIR, exist_ok=True)
+                    try:
+                        with open(os.path.join(path, f), "rb") as a, open(dst, "wb") as b:
+                            b.write(a.read())
+                    except OSError:
+                        pass
+            continue
+        if not path.lower().endswith((".html", ".htm")):
+            continue
+        try:
+            st = os.stat(path)
+            stamp = [st.st_size, int(st.st_mtime)]
+            if seen.get(path) == stamp:
+                continue
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        seen[path] = stamp
+        changed = True
+        m = re.search(r'rel="canonical" href="https://meowdb\.com/msclassic/(maps|monsters|item-db)/(\d+)"', text)
+        if not m:
+            m = re.search(r'meowdb\.com/msclassic/(maps|monsters|item-db)/(\d+)', text)
+        if not m:
+            continue
+        kind, oid = m.groups()
+        payload = _next_payload(text)
+        title = re.search(r"<title>(.*?)(?: - MapleStory| \| NiaMeowDB)", text)
+        name = html.unescape(title.group(1)).strip() if title else None
+        if kind == "maps":
+            info = parse_map_monsters(payload) or parse_monsters_html(text)
+            key = f"map_{oid}"
+            map_pages.add(oid)
+        elif kind == "monsters":
+            # what players saw drop in Classic; the other versions' reference tables only if missing
+            info = parse_classic_drops(text) or parse_drops(payload) or parse_drops_html(text)
+            key = f"mob_{int(oid)}"
+            for mid, _mname, n in parse_mob_locations(payload):
+                from_mobs.setdefault(mid, {})[int(oid)] = {"id": int(oid), "name": name, "count": n}
+        else:
+            info = parse_item(payload, text)
+            key = f"item_{int(oid)}"
+        if info:
+            save_json(MeowDB._path(key), info)
+            if kind == "monsters":
+                save_json(MeowDB._path(f"mobname_{int(oid)}"), {"name": name})
+            done.append((kind, oid, name, info))
+    # maps known only through their monsters' pages (a saved map page always wins)
+    for mid, mobs in from_mobs.items():
+        if mid in map_pages:
+            continue
+        path = MeowDB._path(f"map_{mid}")
+        marker = MeowDB._path(f"mapfrommobs_{mid}")
+        if os.path.exists(path) and not os.path.exists(marker):
+            continue                          # from the map's own page, earlier
+        old = {m["id"]: m for m in (load_json(path, []) or [])} if os.path.exists(marker) else {}
+        old.update(mobs)
+        save_json(path, sorted(old.values(), key=lambda m: -m.get("count", 0)))
+        save_json(marker, {"from": "monster pages"})
+    if changed:
+        save_json(seen_path, seen)
+    return done
+
+
+def icon_ids():
+    """{lower-case item name: icon / item id} from the potion list and everything cached (monster
+    drop lists and item pages)."""
+    out = {name.lower(): iid for iid, name, *_ in CATALOG}
+    try:
+        files = os.listdir(MEOW_DIR)
+    except OSError:
+        return out
+    for f in files:
+        if f.startswith("mob_") and f.endswith(".json"):
+            for dr in load_json(os.path.join(MEOW_DIR, f), []) or []:
+                if isinstance(dr, dict) and dr.get("name") and dr.get("id"):
+                    out.setdefault(dr["name"].lower(), dr["id"])
+        elif f.startswith("item_") and f[5:-5].isdigit():
+            info = load_json(os.path.join(MEOW_DIR, f), {}) or {}
+            if info.get("name") and info.get("id"):
+                out[info["name"].lower()] = info["id"]
+    return out
 
 
 class MeowDB:
@@ -1103,7 +1493,22 @@ class ItemNames:
                 return starts[0]
             if starts:
                 return raw                    # several items start like this: keep it as read
+        if cut and len(base) >= 6:
+            # "nimal Fur Bun..." / "P.nimal Fur Bun...": the start of a real name, read loosely
+            bl = base.lower()
+            sc = sorted(((max(difflib.SequenceMatcher(None, bl, n.lower()[:len(bl) + j]).ratio()
+                              for j in (-1, 0, 1)), n) for n in self.names
+                         if abs(len(n) - len(bl)) < 40 and n.lower()[len(bl) // 2:].find(bl[len(bl) // 2:len(bl) // 2 + 3]) >= -1),
+                        reverse=True)[:2]
+            if sc and sc[0][0] >= 0.8 and (len(sc) == 1 or sc[0][0] > sc[1][0] + 0.04):
+                return sc[0][1]
         close = difflib.get_close_matches(base, self.names, n=2, cutoff=0.84)
+        if not close and len(base) >= 5:
+            # a letter or two cut off the front ("ig's Ribbon", "eather", "titt Feather")
+            ends = [n for n in self.names if len(n) - 3 <= len(base) <= len(n)]
+            close = difflib.get_close_matches(base.lower(), [n.lower()[len(n) - len(base):] for n in ends], n=2,
+                                              cutoff=0.8)
+            close = [next(n for n in ends if n.lower()[len(n) - len(base):] == c) for c in close]
         if close and (len(close) == 1 or difflib.SequenceMatcher(None, base, close[0]).ratio() >
                       difflib.SequenceMatcher(None, base, close[1]).ratio() + 0.03):
             return close[0]
@@ -1330,6 +1735,15 @@ class Profiles:
 
 
 # ----------------------------------------------------------------------------- formatting
+def parse_mesos(text):
+    """A price typed in: "13000", "13,000", "13k", "1.55m", "2b" -> mesos, or None if it isn't one."""
+    s = (text or "").lower().replace(",", "").replace(" ", "").replace("mesos", "").replace("meso", "")
+    m = re.fullmatch(r"(\d+(?:\.\d+)?|\.\d+)([kmb]?)", s)
+    if not m:
+        return None
+    return int(round(float(m.group(1)) * {"": 1, "k": 1_000, "m": 1_000_000, "b": 1_000_000_000}[m.group(2)]))
+
+
 def fmt_int(n):
     return f"{int(n):,}"
 
@@ -1507,12 +1921,31 @@ class Overlay:
         self.canvas.bind("<B1-Motion>", self._drag)
         self.canvas.bind("<ButtonRelease-1>", self._release)
         self.canvas.bind("<Button-3>", lambda e: app.open_controls())
+        self.canvas.bind("<Motion>", self._motion)
         self._photo, self._last = None, None
         w.update_idletasks()
         self.hwnd = top_hwnd(w)
         exclude_from_capture(self.hwnd, app.cfg.get("hide_from_screenshots"))
         self._placed = False
         self._grab = None
+        # the underlay: a rounded game-style panel in its own see-through window just behind the
+        # text (the text window's colour key can't do part-transparency)
+        u = self.under = tk.Toplevel(app.root)
+        u.overrideredirect(True)
+        u.attributes("-topmost", True)
+        u.configure(bg=KEY)
+        u.attributes("-transparentcolor", KEY)
+        self.ucanvas = tk.Canvas(u, bg=KEY, highlightthickness=0, cursor="fleur")
+        self.ucanvas.pack()
+        self.ucanvas.bind("<ButtonPress-1>", self._press)
+        self.ucanvas.bind("<B1-Motion>", self._drag)
+        self.ucanvas.bind("<ButtonRelease-1>", self._release)
+        self.ucanvas.bind("<Button-3>", lambda e: app.open_controls())
+        u.withdraw()
+        u.update_idletasks()
+        self.uhwnd = top_hwnd(u)
+        exclude_from_capture(self.uhwnd, app.cfg.get("hide_from_screenshots"))
+        self._uphoto, self._ubox, self._ushown, self._ukey = None, None, False, None
         self.place()
 
     def place(self, hwnd=None):
@@ -1524,15 +1957,85 @@ class Overlay:
             x, y, w, h = client_rect(hwnd)
             self.win.geometry(f"+{x + int(w * 0.01)}+{y + int(h * 0.42)}")
             self._placed = True
+        self._place_under()
+
+    UNDER_STYLE = {   # fill, outer edge, inner highlight: like the game's windows
+        "dark": ((18, 26, 40), (6, 10, 18), (84, 104, 136)),
+        "light": ((232, 238, 246), (92, 108, 136), (255, 255, 255)),
+    }
+
+    @staticmethod
+    def draw_under(size, style, k):
+        w, h = size
+        fill, edge, hi = Overlay.UNDER_STYLE.get(style, Overlay.UNDER_STYLE["dark"])
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        r = int(7 * k)
+        d.rounded_rectangle([0, 0, w - 1, h - 1], radius=r, fill=edge)
+        d.rounded_rectangle([1, 1, w - 2, h - 2], radius=r - 1, fill=hi)
+        d.rounded_rectangle([2, 2, w - 3, h - 3], radius=max(1, r - 2), fill=fill)
+        return img
+
+    def _place_under(self):
+        cfg = self.app.cfg
+        style = cfg.get("underlay", "off")
+        if style == "off" or self._ubox is None or not self.win.winfo_viewable():
+            if self._ushown:
+                self.under.withdraw()
+                self._ushown = False
+            return
+        bx0, by0, bw, bh = self._ubox
+        self.under.geometry(f"{bw}x{bh}+{self.win.winfo_x() + bx0}+{self.win.winfo_y() + by0}")
+        self.under.attributes("-alpha", max(0.02, min(1.0, float(cfg.get("underlay_opacity", 0.55)))))
+        if not self._ushown:
+            self.under.deiconify()
+            self.under.attributes("-topmost", True)
+            self._ushown = True
+        self.win.lift()
+
+    loot_row = None
+    btn_boxes = {}
 
     def _press(self, e):
         self._grab = (e.x_root - self.win.winfo_x(), e.y_root - self.win.winfo_y())
+        self._down = (e.x_root, e.y_root, e.y_root - self.win.winfo_rooty())   # also from the underlay
+
+    def _motion(self, e):
+        on = next((n for n, (x0, y0, x1, y1) in Overlay.btn_boxes.items()
+                   if x0 - 2 <= e.x <= x1 + 2 and y0 - 2 <= e.y <= y1 + 2), None)
+        self.canvas.config(cursor="hand2" if on else "fleur")
+        if on != getattr(self, "hover_btn", None):
+            self.hover_btn = on
+            self.app.render(time.time())
 
     def _drag(self, e):
         if self._grab:
             self.win.geometry(f"+{e.x_root - self._grab[0]}+{e.y_root - self._grab[1]}")
+            self.win.update_idletasks()
+            self._place_under()
 
     def _release(self, e):
+        down = getattr(self, "_down", None)
+        if self._grab and down and abs(e.x_root - down[0]) + abs(e.y_root - down[1]) < 4:
+            self._grab = None                # a click, not a drag
+            ex, ey = down[0] - self.win.winfo_rootx(), down[2]
+            for name, (bx0, by0, bx1, by1) in Overlay.btn_boxes.items():
+                if bx0 - 2 <= ex <= bx1 + 2 and by0 - 2 <= ey <= by1 + 2:
+                    app = self.app
+                    if name == "gear":
+                        app.open_controls()
+                    elif name == "toggle":
+                        app.toggle()
+                    elif name == "stop":
+                        app.stop()
+                    app.render(time.time())
+                    return
+            r = Overlay.loot_row
+            if r and r[0] <= down[2] < r[1] and self.app.cfg["trackers"].get("loot"):
+                self.app.cfg["overlay_loot_open"] = not self.app.cfg.get("overlay_loot_open")
+                save_json(CONFIG_PATH, self.app.cfg)
+                self.app.render(time.time())
+            return
         if self._grab:
             self._grab = None
             self.app.cfg["panel_x"], self.app.cfg["panel_y"] = self.win.winfo_x(), self.win.winfo_y()
@@ -1542,34 +2045,51 @@ class Overlay:
         if on and not self.win.winfo_viewable():
             self.win.deiconify()
             self.win.attributes("-topmost", True)
+            self.win.update_idletasks()
+            self._place_under()
         elif not on and self.win.winfo_viewable():
             self.win.withdraw()
+            self._place_under()
 
     @staticmethod
     def draw(s, k):
         """The overlay as an RGBA image: a session line, then one block per tracker that's on."""
         on = s.get("on") or {"exp": True, "meso": True, "potions": True}
         W = int(250 * k)
-        img = Image.new("RGBA", (W, int(220 * k)), (0, 0, 0, 0))
+        Overlay.loot_row = None
+        rows = -(-len(s.get("loot_grid") or ()) // 4) if s.get("loot_open") else 0
+        img = Image.new("RGBA", (W, int((230 + 19 * rows) * k)), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         st = max(1, int(round(1.25 * k)))
         lab, num, small = font("black", int(round(11 * k))), font("bold", int(round(10.5 * k))),             font("bold", int(round(8.6 * k)))
         x0 = int(3 * k)
         P = lambda v: int(round(v * k))                # game units -> px
-        # > Kerning Subway <Line 1>   |  || PAUSED · map   |  [] STOPPED · Alt+F7 to start
+        # > Kerning Subway <Line 1> · 12m   |  || PAUSED · map   |  [] STOPPED · press play to start
         state = s.get("state", STOPPED)
         isz = P(7.5)
         state_icon(d, x0 + 1, P(3), isz, state, STATE_COL[state])
         where = s.get("map") or "(no map name)"
-        label = {RUNNING: where, PAUSED: f"PAUSED  ·  {where}", STOPPED: "STOPPED  ·  Alt+F7 to start"}[state]
+        clock = f"  ·  {s['elapsed']}" if s.get("elapsed") else ""
+        label = {RUNNING: where + clock, PAUSED: f"PAUSED  ·  {where}{clock}",
+                 STOPPED: "STOPPED  ·  press play to start"}[state]
         colour = WHITE if state == RUNNING else shade(STATE_COL[state], 0.35)
-        text_runs(d, x0 + isz + 5 * k, P(10.5), [(fit_text(d, label, small, W - isz - 12 * k), small, colour)], st)
+        label = fit_text(d, label, small, W - isz - 12 * k - P(48))
+        label_end = text_runs(d, x0 + isz + 5 * k, P(10.5), [(label, small, colour)], st)
         y = 14                                          # game-unit cursor
         if on.get("exp"):
             # EXP.  2,675 [45.2K/h]  +  gauge with level % and time to level
             x = text_runs(d, x0, P(y + 14), [("EXP.", lab, WHITE)], st) + 5 * k
-            text_runs(d, x, P(y + 14), [(s["exp"], num, WHITE), (" [", num, BRACKET_GREEN),
-                                        (s["exph"], num, WHITE), ("]", num, BRACKET_GREEN)], st)
+            mode = s.get("exp_display", "exp")
+            if mode == "pct":
+                runs = [(s.get("exppct", "-%"), num, WHITE), (" [", num, BRACKET_GREEN),
+                        (s.get("pcth", "-%/h"), num, WHITE), ("]", num, BRACKET_GREEN)]
+            else:
+                runs = [(s["exp"], num, WHITE), (" [", num, BRACKET_GREEN), (s["exph"], num, WHITE),
+                        ("]", num, BRACKET_GREEN)]
+                if mode == "both":
+                    runs += [(" [", num, BRACKET_GREEN), (s.get("pcth", "-%/h"), num, WHITE),
+                             ("]", num, BRACKET_GREEN)]
+            text_runs(d, x, P(y + 14), runs, st)
             gy, gh, gw = P(y + 19), max(6, P(7.5)), P(112)
             exp_gauge(d, x0, gy, gw, gh, (s["pct"] or 0) / 100.0)
             info = (f"{s['pct']:.2f}%" if s["pct"] is not None else "--.--%") +                 (f"  LV UP {s['ttl']}" if s["ttl"] else "")
@@ -1582,8 +2102,7 @@ class Overlay:
             x = text_runs(d, x0 + 2 * r + 4 * k, P(y + 14), [("MESO", lab, WHITE)], st) + 5 * k
             text_runs(d, x, P(y + 14), [(s["meso"], num, WHITE), (" [", num, MESO_GOLD),
                                         (s["mesoh"], num, WHITE), ("]", num, MESO_GOLD)], st)
-            text_runs(d, x0, P(y + 27), [(s["mesox"], small, DIM_TEXT)], st)
-            y += 31
+            y += 19
         if on.get("potions"):
             # (icons) x12 x5   -1,240 [2.4K/h]
             x = x0
@@ -1605,11 +2124,42 @@ class Overlay:
                                                      (s["poth"], num, WHITE), ("]", num, POT_RED)], st)
             y += 17
         if on.get("loot"):
-            x = text_runs(d, x0, P(y + 13), [("LOOT", lab, WHITE)], st) + 5 * k
+            grid = s.get("loot_grid") or ()
+            opened = s.get("loot_open")
+            row0 = P(y)
+            # a small outlined arrow: right = closed, down = open (click the line)
+            ax, ay, a = x0 + P(1), P(y + 8.5), P(3.6)
+            tri = [(ax, ay - a), (ax + a * 1.6, ay), (ax, ay + a)] if not opened else                 [(ax - a * 0.2, ay - a * 0.8), (ax + a * 1.8, ay - a * 0.8), (ax + a * 0.8, ay + a * 0.9)]
+            d.polygon(tri, fill=WHITE, outline=(0, 0, 0))
+            x = text_runs(d, x0 + P(9), P(y + 13), [("LOOT", lab, WHITE)], st) + 5 * k
             x = text_runs(d, x, P(y + 13), [(s.get("loot", "0"), num, PROFIT_GREEN), (" [", num, PROFIT_GREEN),
                                             (s.get("looth", "-/h"), num, WHITE), ("]", num, PROFIT_GREEN)], st)
             text_runs(d, x + 6 * k, P(y + 13), [(s.get("lootx", ""), small, DIM_TEXT)], st)
             y += 17
+            Overlay.loot_row = (row0, P(y))           # click here to open / close the grid
+            if opened:
+                # each item picked up this session: icon and how many, most first
+                cell, gx = P(30), x0
+                if not grid:
+                    text_runs(d, x0 + 2 * k, P(y + 11), [("nothing picked up yet", small, DIM_TEXT)], st)
+                    y += 15
+                for i, (iid, name, qty) in enumerate(grid):
+                    if i and i % 4 == 0:      # 4 to a row, then the next row underneath
+                        gx, y = x0, y + 19
+                    ic = item_icon(iid)
+                    if ic is not None:
+                        sz = P(15)
+                        img.alpha_composite(ic.resize((sz, sz), Image.LANCZOS), (int(gx), P(y + 1)))
+                    else:                      # no icon saved
+                        d.rounded_rectangle([gx + P(1), P(y + 2), gx + P(14), P(y + 15)], radius=P(2),
+                                            fill=(70, 80, 100), outline=(0, 0, 0))
+                        text_runs(d, gx + P(4.5), P(y + 12), [("?", small, WHITE)], st)
+                    text_runs(d, gx + P(14), P(y + 17), [(fmt_short(qty) if qty >= 1000 else str(qty), small, WHITE)],
+                              st)
+                    gx += cell
+                    if i == len(grid) - 1:
+                        y += 20
+                Overlay.loot_row = (row0, P(y))
         if sum(bool(on.get(kk)) for kk in ("meso", "loot", "potions")) >= 2:
             col = PROFIT_GREEN if s.get("profit_v", 0) >= 0 else PROFIT_RED
             x = text_runs(d, x0, P(y + 13), [("PROFIT", lab, WHITE)], st) + 5 * k
@@ -1622,6 +2172,21 @@ class Overlay:
         if s.get("status"):
             text_runs(d, x0, P(y + 12), [(s["status"].splitlines()[0], small, (255, 120, 100))], st)
             y += 15
+        # the buttons, top right: gear (tracker window), play / pause, stop
+        bs, gap = P(14), P(2.5)
+        right = max((img.getbbox() or (0, 0, W, 0))[2], label_end + 3 * bs + 2 * gap + P(8))
+        right = min(right, W - 2)
+        running = state == RUNNING
+        specs = (("gear", "gear", "gear"),
+                 ("toggle", "pause" if running else "play", "pause" if running else "play"),
+                 ("stop", "stop" if state != STOPPED else "off", "stop"))
+        Overlay.btn_boxes = {}
+        hover = s.get("hover_btn")
+        for i, (name, kind, glyph) in enumerate(specs):
+            bx1 = right - (2 - i) * (bs + gap)
+            box = (int(bx1 - bs), 0, int(bx1), int(bs))
+            overlay_button(img, box, kind, glyph, hover == name)
+            Overlay.btn_boxes[name] = box
         return img.crop((0, 0, W, P(y + 3)))
 
     def render(self, s):
@@ -1634,6 +2199,24 @@ class Overlay:
         self.canvas.config(width=img.width, height=img.height)
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, image=self._photo, anchor="nw")
+        # the underlay fits what's drawn, with a margin
+        style = s.get("under", ("off",))[0]
+        box = img.getbbox()
+        if style != "off" and box:
+            pad = int(6 * self.k)
+            x0, y0, x1, y1 = box
+            bw, bh = x1 - x0 + 2 * pad, y1 - y0 + 2 * pad
+            if self._ukey != (bw, bh, style):
+                self._uphoto = ImageTk.PhotoImage(to_keyed(self.draw_under((bw, bh), style, self.k)),
+                                                  master=self.ucanvas)
+                self.ucanvas.config(width=bw, height=bh)
+                self.ucanvas.delete("all")
+                self.ucanvas.create_image(0, 0, image=self._uphoto, anchor="nw")
+                self._ukey = (bw, bh, style)
+            self._ubox = (x0 - pad, y0 - pad, bw, bh)
+        else:
+            self._ubox = None
+        self._place_under()
 
 
 # ----------------------------------------------------------------------------- game-style windows
@@ -1710,6 +2293,8 @@ class MapleWindow:
         self._hover_drag = None
         self.drags = {}              # name -> (box, payload): things that can be dragged
         self.drops = {}              # name -> (box, handler(payload)): where they can be dropped
+        self.sliders = {}            # name -> (track box, set(0..1), done())
+        self.sliding = None
         self.dragging = None         # [payload, start x, start y, mouse x, mouse y]
         self.hover = self.down = None
         self._grab = None
@@ -1781,8 +2366,19 @@ class MapleWindow:
                 return name
         return None
 
+    def _slide(self, e):
+        (x0, _, x1, _), setter, _done = self.sliders[self.sliding]
+        setter(max(0.0, min(1.0, (e.x - x0) / max(1, x1 - x0))))
+        self.redraw_soon()
+
     def _press(self, e):
         self.win.focus_force()
+        for name, (box, _, _) in self.sliders.items():
+            x0, y0, x1, y1 = box
+            if x0 - self.u(6) <= e.x < x1 + self.u(6) and y0 - self.u(5) <= e.y < y1 + self.u(5):
+                self.sliding = name
+                self._slide(e)
+                return
         src = self._in(self.drags, e.x, e.y)
         if src:                      # start dragging something (it follows the mouse)
             self.dragging = [self.drags[src][1], e.x, e.y, e.x, e.y]
@@ -1795,6 +2391,9 @@ class MapleWindow:
             self._grab = (e.x_root - self.win.winfo_x(), e.y_root - self.win.winfo_y())
 
     def _drag(self, e):
+        if self.sliding:
+            self._slide(e)
+            return
         if self.dragging:
             self.dragging[3], self.dragging[4] = e.x, e.y
             self.redraw()
@@ -1803,6 +2402,12 @@ class MapleWindow:
             self.win.geometry(f"+{e.x_root - self._grab[0]}+{e.y_root - self._grab[1]}")
 
     def _release(self, e):
+        if self.sliding:
+            done = self.sliders.get(self.sliding, (None, None, None))[2]
+            self.sliding = None
+            if done:
+                done()
+            return
         if self.dragging:
             payload, sx, sy, _, _ = self.dragging
             self.dragging = None
@@ -1846,6 +2451,17 @@ class MapleWindow:
         return self._in(self.drops, self.dragging[3], self.dragging[4])
 
     # --- drawing
+    def redraw_soon(self):
+        """Redraw once things settle: a burst of wheel / drag events draws only the last state."""
+        if getattr(self, "_rd_pending", False) or self.closed:
+            return
+        self._rd_pending = True
+
+        def go():
+            self._rd_pending = False
+            self.redraw()
+        self.win.after_idle(go)
+
     def redraw(self):
         if self.closed:
             return
@@ -1876,7 +2492,7 @@ class MapleWindow:
         d.rounded_rectangle([1, 1, W - 2, H - 2], radius=R - 1, outline=FRAME_LIGHT)
         d.rounded_rectangle([u(4), u(4), W - u(5), u(21)], radius=u(3), fill=WHITE, outline=TITLE_EDGE)
         d.text((u(10), u(16.5)), self.TITLE, font=font("tahoma", u(9)), fill=(40, 44, 56), anchor="ls")
-        self.buttons, self.drags, self.drops = {}, {}, {}
+        self.buttons, self.drags, self.drops, self.sliders = {}, {}, {}, {}
         self.button(img, "close", (W - u(21), u(6.5), W - u(7.5), u(19)), BTN_BLUE, "X", self.close)
         self.draw_body(img)
         return img
@@ -1944,6 +2560,72 @@ class PromptWindow(MapleWindow):
         self.button(img, "ok", (W - u(14) - u(150), by0, W - u(14) - u(80), by1), self.ok_pal,
                     self.ok_text, self.ok)
         self.button(img, "cancel", (W - u(14) - u(70), by0, W - u(14), by1), BTN_GREY, "CANCEL", self.close)
+
+
+def slider(d, box, value, k, active=False):
+    """The game's options slider: a white rounded track with a blue thumb."""
+    x0, y0, x1, y1 = box
+    h = y1 - y0
+    d.rounded_rectangle([x0, y0, x1, y1], radius=h // 2, fill=(250, 252, 255), outline=(176, 184, 196))
+    d.line([(x0 + h // 2, y0 + 1), (x1 - h // 2, y0 + 1)], fill=(214, 220, 230))
+    tw, th = int(round(17 * k)), int(round(10 * k))
+    cx = x0 + (x1 - x0) * value
+    cy = (y0 + y1) / 2
+    tb = [cx - tw / 2, cy - th / 2, cx + tw / 2, cy + th / 2]
+    d.rounded_rectangle(tb, radius=int(3 * k), fill=(20, 38, 62))
+    top, bot = ((120, 170, 220), (52, 98, 154)) if not active else ((150, 196, 240), (70, 120, 180))
+    inner = [tb[0] + 1, tb[1] + 1, tb[2] - 1, tb[3] - 1]
+    d.rounded_rectangle(inner, radius=int(2.5 * k), fill=bot)
+    d.rounded_rectangle([inner[0], inner[1], inner[2], (inner[1] + inner[3]) / 2], radius=int(2.5 * k), fill=top)
+    for i in (-2, 0, 2):                      # the grip lines
+        gx = cx + i * k
+        d.line([(gx, cy - th * 0.22), (gx, cy + th * 0.22)], fill=(200, 222, 244))
+
+
+OV_BTN = {   # the game's small window buttons: light top, dark bottom, dark edge, white glyph
+    "gear": ((120, 196, 250), (36, 120, 214), (14, 52, 110)),
+    "play": ((140, 226, 90), (52, 156, 28), (20, 76, 8)),
+    "pause": ((255, 196, 80), (232, 128, 10), (120, 60, 0)),
+    "stop": ((255, 120, 110), (214, 40, 36), (110, 14, 12)),
+    "off": ((214, 220, 228), (156, 164, 178), (90, 98, 112)),
+}
+
+
+def overlay_button(img, box, kind, glyph, hover=False):
+    """A small square game-style button with a white glyph (gear, play, pause or stop)."""
+    d = ImageDraw.Draw(img)
+    x0, y0, x1, y1 = box
+    top, bot, edge = OV_BTN[kind]
+    if hover:
+        top, bot = shade(top, 0.15), shade(bot, 0.15)
+    s = x1 - x0
+    r = max(2, int(s * 0.18))
+    d.rounded_rectangle(box, radius=r, fill=edge)
+    d.rounded_rectangle([x0 + 1, y0 + 1, x1 - 1, y1 - 1], radius=r - 1, fill=bot)
+    d.rounded_rectangle([x0 + 1, y0 + 1, x1 - 1, y0 + s * 0.5], radius=r - 1, fill=top)
+    d.line([(x0 + r, y0 + 1.5), (x1 - r, y0 + 1.5)], fill=shade(top, 0.35))     # the shine
+    cx, cy, g = (x0 + x1) / 2, (y0 + y1) / 2, s * 0.27
+    white, dark = (255, 255, 255), edge
+    if glyph == "play":
+        pts = [(cx - g * 0.75, cy - g), (cx + g, cy), (cx - g * 0.75, cy + g)]
+        d.polygon(pts, fill=white, outline=dark)
+    elif glyph == "pause":
+        w = g * 0.55
+        for bx in (cx - g * 0.75, cx + g * 0.2):
+            d.rectangle([bx, cy - g, bx + w, cy + g], fill=white, outline=dark)
+    elif glyph == "stop":
+        d.rectangle([cx - g * 0.85, cy - g * 0.85, cx + g * 0.85, cy + g * 0.85], fill=white, outline=dark)
+    elif glyph == "gear":
+        import math
+        teeth, ro, ri = 6, g * 1.25, g * 0.86
+        pts = []
+        for i in range(teeth):
+            a0 = math.pi * 2 * i / teeth - math.pi / 2
+            for da, rr in ((-0.52, ri), (-0.24, ro), (0.24, ro), (0.52, ri)):     # a square-ish tooth
+                pts.append((cx + rr * math.cos(a0 + da), cy + rr * math.sin(a0 + da)))
+        d.polygon(pts, fill=white, outline=dark)
+        h = g * 0.42
+        d.ellipse([cx - h, cy - h, cx + h, cy + h], fill=bot, outline=dark)
 
 
 def checkbox(d, x, y, size, on, hover=False):
@@ -2101,6 +2783,211 @@ class MapSuggest:
             self.top = None
 
 
+def is_quest_item(item_id, info=None):
+    """Quest items can't be sold or traded: NiaDB marks them untradeable; without that, item IDs
+    403xxxx are the game's quest items."""
+    if info and (info.get("untradeable") or "quest" in (info.get("category") or info.get("cat") or "").lower()):
+        return True
+    return bool(item_id) and 4030000 <= int(item_id) < 4040000
+
+
+class MapInfoWindow(MapleWindow):
+    """A map's monsters, and each monster's drops as players saw them in MS Classic (votes), what it's worth (your price or the
+    NPC's) and whether it counts toward PROFIT. Quest items are left out. Data: NiaDB, from what's
+    cached - saved pages in meowdb_import/, or looked up when that's allowed."""
+    W, H = 384, 300
+
+    def __init__(self, app, m):
+        self.map = m
+        self.TITLE = m["name"].upper()
+        super().__init__(app)
+        self.expanded = set()
+        self.scroll = 0
+        self.mobs = None                  # [{"id", "name", "count"}] or None (unknown)
+        self.mob_drops = {}                   # mob id -> [drops] or None
+        self.items = {}                   # item page -> info
+        par = app.controls.win if app.controls and not app.controls.closed else None
+        self.centre_on(par)
+        self.load()
+        self.win.focus_force()
+
+    def load(self):
+        app = self.app
+        app.import_pages()
+        app.meow.map_monsters(self.map["id"], self._got_mobs)
+
+    def _soon(self):
+        """One redraw once the burst of cached lookups is in, not one per drop."""
+        if self.closed or getattr(self, "_redraw_due", False):
+            return
+        self._redraw_due = True
+
+        def go():
+            self._redraw_due = False
+            if not self.closed:
+                self.redraw()
+        self.win.after_idle(go)
+
+    def _got_mobs(self, mobs):
+        self.mobs = mobs
+        for mob in mobs or []:
+            self.app.meow.drops(mob["id"], lambda d, i=mob["id"]: self._got_drops(i, d))
+        self._soon()
+
+    def _got_drops(self, mob_id, drops):
+        self.mob_drops[mob_id] = drops
+        for dr in drops or []:
+            self.app.meow.item(dr["page"], lambda info, pg=dr["page"]: self._got_item(pg, info))
+        self._soon()
+
+    def _got_item(self, page, info):
+        if info:
+            self.items[page] = info
+            if info.get("npc") is not None and info.get("name"):
+                self.app.prices.entry(info["name"])["npc"] = info["npc"]
+        self._soon()
+
+    def toggle(self, mob_id):
+        self.expanded ^= {mob_id}
+        self.redraw()
+
+    def on_wheel(self, e):
+        self.scroll -= int(e.delta / 120 * self.u(24))
+        self.redraw_soon()
+
+    def draw_body(self, img):
+        W, H, u, app = self.Wp, self.Hp, self.u, self.app
+        d = ImageDraw.Draw(img)
+        st = max(1, u(1.1))
+        d.rounded_rectangle([u(4), u(25), W - u(5), H - u(5)], radius=u(3), fill=BODY_FILL, outline=(120, 150, 170))
+        m = self.map
+        area = m["city"].title() if m.get("city") and m["city"] != "other" else m.get("region_name", "")
+        d.text((u(12), u(39)), f"{m['street']}, {area}", font=font("bold", u(8.6)), fill=WHITE, anchor="ls",
+               stroke_width=st, stroke_fill=(38, 62, 96))
+        self.button(img, "reload", (W - u(12) - u(70), u(28), W - u(12), u(43)), BTN_BLUE, "RELOAD", self.load)
+        lx0, ly0, lx1, ly1 = u(10), u(48), W - u(11), H - u(38)
+        d = ImageDraw.Draw(img)
+        d.rectangle([lx0, ly0, lx1, ly1], fill=LIST_BG, outline=NAVY)
+        if not self.mobs:
+            msg = ("Loading..." if self.mobs is None and app.meow.online else
+                   f"This map's monsters aren't saved yet. Open this map on meowdb.com, press Ctrl+S "
+                   f"(Webpage, HTML only) into the meowdb_import folder, then press RELOAD. Map ID: {m['id']}")
+            y = ly0 + u(20)
+            for line in wrap_text(d, msg, font("bold", u(8.4)), lx1 - lx0 - u(24)):
+                d.text((lx0 + u(12), y), line, font=font("bold", u(8.4)), fill=(70, 86, 110), anchor="ls")
+                y += u(12)
+        else:
+            self._draw_list(img, (lx0, ly0, lx1, ly1))
+        d = ImageDraw.Draw(img)
+        d.text((u(12), H - u(24)), "▲ = player votes that it drops in Classic. Untick to leave it out of PROFIT.", font=font("bold", u(7.4)), fill=(34, 56, 92), anchor="ls")
+        d.text((u(12), H - u(13)), MEOW_CREDIT, font=font("reg", u(7.4)), fill=(70, 86, 110), anchor="ls")
+
+    def _draw_list(self, img, box):
+        u, app = self.u, self.app
+        lx0, ly0, lx1, ly1 = box
+        vx0, vy0, vx1, vy1 = lx0 + 1, ly0 + 1, lx1 - u(6), ly1
+        vw, vh = vx1 - vx0, vy1 - vy0
+        rows = []
+        for mob in self.mobs:
+            rows.append(("mob", mob))
+            if mob["id"] in self.expanded:
+                drops = self.mob_drops.get(mob["id"])
+                if drops is None:
+                    rows.append(("note", "Drops not saved yet: open this monster on meowdb.com, Ctrl+S into "
+                                         "meowdb_import, then RELOAD."))
+                    continue
+                quests = 0
+                for dr in drops:
+                    if is_quest_item(dr["id"], self.items.get(dr["page"])) or "quest" in dr.get("cat", "").lower():
+                        quests += 1
+                        continue
+                    rows.append(("drop", dr))
+                if quests:
+                    rows.append(("note", f"{quests} quest item{'s' if quests != 1 else ''} left out"))
+        MOB_H, DROP_H, NOTE_H = u(21), u(20), u(15)
+        hgt = {"mob": MOB_H, "drop": DROP_H, "note": NOTE_H}
+        total = sum(hgt[k] for k, _ in rows)
+        self.scroll = max(0, min(self.scroll, total - vh))
+        layer = Image.new("RGBA", (vw, max(total, 1)), (0, 0, 0, 0))
+        prof = app.cfg["profit"]
+        st = max(1, u(1.1))
+        y, buttons = 0, []
+        for kind, data in rows:
+            h = hgt[kind]
+            top = vy0 + y - self.scroll
+            visible = top >= vy0 - 1 and top + h <= vy1 + 1
+            ld = ImageDraw.Draw(layer)
+            if kind == "mob":
+                hov = self.hover == f"mob:{data['id']}"
+                grad_rrect(layer, (0, y, vw, y + h - 1), 0, shade(PANEL_TOP, 0.12 if hov else 0),
+                           shade(PANEL_BOT, 0.12 if hov else 0))
+                ld = ImageDraw.Draw(layer)
+                tx, ty = u(7), y + h / 2
+                if data["id"] in self.expanded:
+                    ld.polygon([(tx, ty - u(2.5)), (tx + u(7), ty - u(2.5)), (tx + u(3.5), ty + u(3))], fill=WHITE)
+                else:
+                    ld.polygon([(tx + u(1), ty - u(3.5)), (tx + u(1), ty + u(3.5)), (tx + u(6.5), ty)], fill=WHITE)
+                ld.text((u(18), y + h / 2 + u(3.5)), data["name"], font=font("bold", u(9.2)), fill=WHITE, anchor="ls",
+                        stroke_width=st, stroke_fill=(20, 36, 84))
+                drops = self.mob_drops.get(data["id"])
+                info = (f"{data['count']} here  ·  " if data.get("count") else "") + (
+                    (f"{len(drops)} drops" + ("" if drops and "up" in drops[0] else " (reference)"))
+                    if drops is not None else "drops not saved")
+                ld.text((vw - u(7), y + h / 2 + u(3)), info, font=font("bold", u(7.8)), fill=WHITE, anchor="rs",
+                        stroke_width=st, stroke_fill=(20, 36, 84))
+                if visible:
+                    self.buttons[f"mob:{data['id']}"] = ((vx0, top, vx1, top + h),
+                                                         (lambda i=data["id"]: self.toggle(i)))
+            elif kind == "note":
+                ld.text((u(22), y + u(10.5)), fit_text(ld, data, font("bold", u(7.6)), vw - u(30)),
+                        font=font("bold", u(7.6)), fill=(110, 122, 144), anchor="ls")
+            else:
+                dr = data
+                info = self.items.get(dr["page"])
+                name = (info or {}).get("name") or dr["name"]
+                e = app.prices.items.get(name, {})
+                kind_ = "equip" if (info or {}).get("equip") or str(dr["id"]).startswith("1") else \
+                    loot_kind(name, "Use" if str(dr["id"]).startswith("2") else
+                              "Setup" if str(dr["id"]).startswith("3") else "Etc")
+                counted = e.get("include", True) and prof.get(kind_, True)
+                ld.rectangle([0, y, vw, y + h - 1], fill=LIST_ALT if len(buttons) % 2 else LIST_BG)
+                ic = item_icon(dr["id"])
+                if ic is not None:
+                    layer.alpha_composite(ic.resize((u(15), u(15)), Image.LANCZOS), (u(20), y + u(2)))
+                else:
+                    ld.rounded_rectangle([u(21), y + u(3), u(34), y + u(16)], radius=u(2), fill=(226, 232, 242),
+                                         outline=(170, 180, 196))
+                ld = ImageDraw.Draw(layer)
+                ink = INK if counted else (150, 158, 172)
+                ld.text((u(40), y + u(13)), fit_text(ld, name, font("bold", u(8.2)), u(116)), font=font("bold", u(8.2)),
+                        fill=ink, anchor="ls")
+                if "up" in dr:      # MS Classic community drops: votes, not chances
+                    ld.text((u(190), y + u(13)), f"▲{dr['up']:g}", font=font("bold", u(8)), fill=(40, 120, 50),
+                            anchor="rs")
+                else:
+                    ld.text((u(190), y + u(13)), dr.get("chance") or "", font=font("bold", u(8)),
+                            fill=(80, 96, 124), anchor="rs")
+                buttons.append((top, h, name, kind_, e.get("include", True), visible))
+            y += h
+        img.alpha_composite(layer.crop((0, self.scroll, vw, self.scroll + vh)), (vx0, vy0))
+        d = ImageDraw.Draw(img)
+        for top, h, name, kind_, inc, visible in buttons:
+            if not visible:
+                continue
+            unit, src = app.prices.unit(name)
+            label = (fmt_int(unit) + (" NPC" if src == "NPC" else "")) if src else "SET PRICE"
+            self.button(img, f"mp:{name}", (vx0 + u(198), top + u(3), vx0 + u(262), top + u(17)),
+                        BTN_GREY if src else BTN_ORANGE, label, (lambda n=name: app.ask_item_price(n)))
+            d = ImageDraw.Draw(img)
+            cb = (vx1 - u(19), top + u(4), vx1 - u(6), top + u(17))
+            checkbox(d, cb[0], cb[1], u(12), inc, self.hover == f"mi:{name}")
+            self.buttons[f"mi:{name}"] = (tuple(int(v) for v in cb), (lambda n=name: (app.toggle_item(n), self.redraw())))
+        if total > vh:
+            th = max(u(12), int(vh * vh / total))
+            ty0 = vy0 + int((vh - th) * self.scroll / max(1, total - vh))
+            d.rectangle([lx1 - u(4), ty0, lx1 - 1, ty0 + th], fill=(60, 110, 200))
+
+
 class TrackerWindow(MapleWindow):
     """The tracker window. Tabs: TRACKER (map name, start / pause / stop, numbers, resets), LOG
     (saved sessions for the current character, grouped by map), POTIONS (which potions to count
@@ -2123,7 +3010,7 @@ class TrackerWindow(MapleWindow):
         self.qs_pic, self._panel_at = None, 0.0     # picture of the game's quick slots
         self._hover_drag = None
         self.map_ent, self.map_var, self.map_item = self.entry(
-            (self.u(46), self.u(48), self.Wp - self.u(112), self.u(64)), app.session.map,
+            (self.u(46), self.u(48), self.Wp - self.u(160), self.u(64)), app.session.map,
             on_change=app.set_map)
         self.map_suggest = MapSuggest(self, self.map_ent, self.map_var)
         self.loot_query = ""
@@ -2165,10 +3052,10 @@ class TrackerWindow(MapleWindow):
             self.map_var.set(text)
 
     def on_wheel(self, e):
-        if self.tab in ("log", "loot"):
+        if self.tab in ("log", "loot", "settings"):
             self.scroll -= int(e.delta / 120 * self.u(24))
             self._sig = None
-            self.redraw()
+            self.redraw_soon()
 
     def render(self, s):
         self.s = s
@@ -2243,8 +3130,8 @@ class TrackerWindow(MapleWindow):
         d.line([ax0 + 1, u(41), ax0 + tw - 2, u(41)], fill=BODY_FILL)
         getattr(self, "draw_" + self.tab)(img)
         d = ImageDraw.Draw(img)
-        d.text((u(9), H - u(8.5)), "Alt+F6 this window  ·  Alt+F7 start / pause / resume  ·  "
-               "drag the overlay to move it", font=font("reg", u(7.6)), fill=(70, 86, 110), anchor="ls")
+        hint = "The overlay's buttons: gear = this window, play / pause, stop  ·  drag the overlay to move it"
+        d.text((u(9), H - u(8.5)), hint, font=font("reg", u(7.6)), fill=(70, 86, 110), anchor="ls")
 
     def panel(self, img, box, title, coin=False):
         x0, y0, x1, y1 = box
@@ -2279,9 +3166,13 @@ class TrackerWindow(MapleWindow):
         on = app.cfg["trackers"]
         d = ImageDraw.Draw(img)
         st = max(1, u(1.1))
-        # MAP [..........] [RUNNING]
+        # MAP [..........] [MOBS] [RUNNING]
         d.text((u(12), u(60)), "MAP", font=font("black", u(10)), fill=WHITE, anchor="ls", stroke_width=st,
                stroke_fill=(38, 62, 96))
+        known = app.current_map()
+        self.button(img, "mobs", (W - u(155), u(48), W - u(111), u(64)), BTN_BLUE, "MOBS",
+                    (lambda: app.open_map_info()), enabled=known is not None)
+        d = ImageDraw.Draw(img)
         bx0, bx1 = W - u(106), W - u(12)
         col = STATE_COL[se.state]
         grad_rrect(img, (bx0, u(48), bx1, u(64)), u(8), shade(col, 0.25), shade(col, -0.15),
@@ -2380,11 +3271,54 @@ class TrackerWindow(MapleWindow):
                     lambda: app.shutdown("quit"))
 
     def draw_settings(self, img):
+        """The settings, scrolled (mouse wheel or the bar on the right) when they don't all fit."""
+        W, H, u = self.Wp, self.Hp, self.u
+        vy0, vy1 = u(43), H - u(24)            # inside the panel's border
+        vh = vy1 - vy0
+        app = self.app
+        key = (self.hover, self.sliding,
+               json.dumps({k: app.cfg.get(k) for k in ("trackers", "profit", "exp_display", "underlay",
+                                                       "underlay_opacity", "auto_profile",
+                                                       "close_with_game", "hide_from_screenshots")}, sort_keys=True))
+        cache = getattr(self, "_set_cache", None)
+        if cache is None or cache[0] != key:
+            layer = Image.new("RGBA", (W, u(460)), (0, 0, 0, 0))
+            before = {"b": set(self.buttons), "s": set(self.sliders)}
+            total = self._settings_body(layer, u(3)) + u(4)
+            made = {"b": {n: v for n, v in self.buttons.items() if n not in before["b"]},
+                    "s": {n: v for n, v in self.sliders.items() if n not in before["s"]}}
+            cache = self._set_cache = (key, layer, total, made)
+        _, layer, total, made = cache
+        self.scroll = max(0, min(self.scroll, total - vh))
+        img.alpha_composite(layer.crop((0, self.scroll, W, self.scroll + vh)), (0, vy0))
+        off = vy0 - self.scroll
+        for table, mk in ((self.buttons, made["b"]), (self.sliders, made["s"])):
+            for name, entry in mk.items():
+                table[name] = entry
+                box, *rest = table[name]
+                nb = (box[0], box[1] + off, box[2], box[3] + off)
+                if nb[3] < vy0 + u(4) or nb[1] > vy1 - u(4):
+                    del table[name]             # scrolled out of view
+                else:
+                    table[name] = (nb, *rest)
+        if total > vh:                          # the scroll bar, game style
+            d = ImageDraw.Draw(img)
+            bx0, bx1 = W - u(10), W - u(5)
+            d.rounded_rectangle([bx0, vy0, bx1, vy1], radius=u(2), fill=(226, 234, 244), outline=(120, 140, 170))
+            th = max(u(16), int(vh * vh / total))
+            ty0 = vy0 + int((vh - th) * self.scroll / max(1, total - vh))
+            d.rounded_rectangle([bx0, ty0, bx1, ty0 + th], radius=u(2), fill=(52, 98, 154), outline=(20, 38, 62))
+            d.line([(bx0 + 1, ty0 + 1), (bx0 + 1, ty0 + th - 1)], fill=(120, 170, 220))
+            self.sliders["set_scroll"] = ((bx0, vy0, bx1, vy1),
+                                          lambda v: setattr(self, "scroll", int(v * (total - vh))), None)
+
+    def _settings_body(self, img, y):
+        """Draws the settings from y down; -> where they end."""
         W, u, app = self.Wp, self.u, self.app
+        W -= u(8)                               # room for the scroll bar
         d = ImageDraw.Draw(img)
         st = max(1, u(1.1))
         on = app.cfg["trackers"]
-        y = u(47)
 
         def heading(text, yy):
             d.text((u(12), yy + u(11)), text, font=font("black", u(9.5)), fill=WHITE, anchor="ls",
@@ -2432,6 +3366,48 @@ class TrackerWindow(MapleWindow):
         d.text((u(14), y + u(6)), "PROFIT = mesos + loot that counts - potions. Loot is priced on the LOOT tab.",
                font=font("bold", u(7.8)), fill=(34, 56, 92), anchor="ls")
         y += u(10)
+        heading("OVERLAY", y)
+        y += u(15)
+
+        def choice(name, x, yy, w, title, chosen, action):
+            box = (x, yy, x + w, yy + u(15))
+            hov = self.hover == name
+            top, bot = ((96, 172, 240), (30, 96, 170)) if chosen else ((246, 248, 252), (200, 208, 220))
+            if hov:
+                top, bot = shade(top, 0.12), shade(bot, 0.12)
+            d.rounded_rectangle(box, radius=u(3), fill=bot, outline=(40, 60, 96))
+            d.rounded_rectangle([box[0] + 1, box[1] + 1, box[2] - 1, (box[1] + box[3]) / 2], radius=u(3), fill=top)
+            d.text(((box[0] + box[2]) / 2, yy + u(11)), title, font=font("bold", u(8)),
+                   fill=WHITE if chosen else (40, 56, 84), anchor="ms",
+                   stroke_width=st if chosen else 0, stroke_fill=(20, 50, 100))
+            self.buttons[name] = (box, action)
+
+        def label(text, yy):
+            d.text((u(14), yy + u(11)), text, font=font("bold", u(8.6)), fill=WHITE, anchor="ls", stroke_width=st,
+                   stroke_fill=(38, 62, 96))
+
+        label("EXP shows", y)
+        mode = app.cfg.get("exp_display", "exp")
+        for i, (k_, title) in enumerate((("exp", "EXP / h"), ("pct", "% / h"), ("both", "Both"))):
+            choice(f"x_{k_}", u(80) + i * u(54), y, u(50), title, mode == k_,
+                   lambda kk=k_: app.set_value("exp_display", kk))
+        y += u(19)
+        label("Background", y)
+        style = app.cfg.get("underlay", "off")
+        for i, (k_, title) in enumerate((("off", "Off"), ("light", "Light"), ("dark", "Dark"))):
+            choice(f"u_{k_}", u(80) + i * u(38), y, u(35), title, style == k_,
+                   lambda kk=k_: app.set_value("underlay", kk))
+        # opacity: 0% ---[]--- 100%
+        sx0, sx1 = u(214), W - u(36)
+        op = float(app.cfg.get("underlay_opacity", 0.55))
+        dim = (34, 56, 92) if style != "off" else (110, 128, 150)
+        d.text((sx0 - u(5), y + u(11)), "0%", font=font("bold", u(7.8)), fill=dim, anchor="rs")
+        d.text((sx1 + u(5), y + u(11)), "100%", font=font("bold", u(7.8)), fill=dim, anchor="ls")
+        tb = (sx0, y + u(4), sx1, y + u(11))
+        slider(d, tb, op, self.k, self.sliding == "u_op")
+        self.sliders["u_op"] = (tb, lambda v: app.set_value("underlay_opacity", round(v, 2), save=False),
+                                lambda: app.set_value("underlay_opacity", app.cfg["underlay_opacity"]))
+        y += u(21)
         heading("OPTIONS", y)
         y += u(15)
         toggle("o_auto", y, "Switch character automatically",
@@ -2446,6 +3422,7 @@ class TrackerWindow(MapleWindow):
                "Leaves MapleTracker out of ALL screen capture (yours too: OBS, Discord, Snipping Tool).",
                app.cfg.get("hide_from_screenshots"),
                lambda: app.set_option("hide_from_screenshots", not app.cfg.get("hide_from_screenshots")))
+        return y + u(26)
 
     def draw_loot(self, img):
         """This session's pickups first, then everything else in your price book: price (click to
@@ -2906,8 +3883,6 @@ class CatalogWindow(MapleWindow):
 
 # ----------------------------------------------------------------------------- app
 class App:
-    HOTKEYS = {1: (0x0001, 0x75, "controls"),     # Alt+F6
-               2: (0x0001, 0x76, "toggle")}       # Alt+F7: start / pause / resume
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -2928,12 +3903,17 @@ class App:
         self.pot_now = {}               # potion index -> count read right now (for the POTIONS tab)
         self.ocr = Ocr()
         self.msgs = MessageReader(self.ocr)          # mesos (a narrow strip reads best)
+        self.icon_ids = icon_ids()                   # item name -> icon, from what's cached
         self.names = ItemNames()                     # real item names (NiaDB's list, cached)
-        self.items = MessageReader(self.ocr, canon=self.canon_item)   # item pickups (a wider strip)
+        self.items = ItemFeed(self.ocr, canon=self.canon_item)   # item pickups (a wider strip)
         self.prices = PriceBook()
         self.meow = MeowDB(self, online=bool(self.cfg.get("niadb_online")))
+        global ICONS_ONLINE
+        ICONS_ONLINE = bool(self.cfg.get("niadb_online"))
+        self.import_pages()
         self.meow.item_index(lambda idx: self.names.set_names(idx.keys()) if idx else None)
         self.maps, self.map_id = [], None
+        self.map_win = None
         self.meow.maps(lambda maps: setattr(self, "maps", maps or []))
         self.quit = False
         self.controls = None
@@ -2950,9 +3930,6 @@ class App:
         self.root = tk.Tk()
         self.root.withdraw()
         self.overlay = Overlay(self)
-        self.hotkeys = queue.Queue()
-        self._hk_thread_id = None
-        threading.Thread(target=self._hotkey_thread, daemon=True).start()
         if self.reader.tpl is None:
             log("statusbar_glyphs.npz missing - EXP can't be read")
         if self.ocr.error:
@@ -2973,19 +3950,6 @@ class App:
             if data["name"] == self.profile["name"]:
                 self.profile = data
             log(f"logged an interrupted session at {old.map} for {data['name']}")
-
-    # --- hotkeys (RegisterHotKey works while the admin game has focus)
-    def _hotkey_thread(self):
-        self._hk_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        for hk_id, (mods, vk, name) in self.HOTKEYS.items():
-            if not user32.RegisterHotKey(None, hk_id, mods | 0x4000, vk):
-                log(f"could not register hotkey for {name} (another program may own it)")
-        msg = wt.MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == 0x0312:
-                self.hotkeys.put(self.HOTKEYS.get(msg.wParam, (0, 0, ""))[2])
-        for hk_id in self.HOTKEYS:
-            user32.UnregisterHotKey(None, hk_id)
 
     def open_controls(self):
         if self.controls is not None and not self.controls.closed:
@@ -3207,29 +4171,32 @@ class App:
         e = self.prices.items.get(name) or {}
 
         def ok(text):
-            text = (text or "").replace(",", "").replace("mesos", "").strip().lower()
+            text = (text or "").strip().lower()
             if text in ("", "npc", "-"):
                 self.prices.set_price(name, None)            # back to the NPC / default price
             else:
-                try:
-                    v = int(float(text[:-1]) * 1000) if text.endswith("k") else \
-                        int(float(text[:-1]) * 1_000_000) if text.endswith("m") else int(text)
-                except ValueError:
-                    return "Type a number, like 2500, 25k or 1.5m."
-                if v < 0:
-                    return "That price doesn't look right."
+                v = parse_mesos(text)
+                if v is None:
+                    return "Type a price like 2500, 13k or 1.55m."
                 self.prices.set_price(name, v)
             self.logs_version += 1
             self.render(time.time())
         npc = e.get("npc")
         hint = f" NPC buys it for {fmt_int(npc)}." if npc is not None else ""
-        self.ask("Item price", f"What is one {name} worth to you (mesos)? Leave empty for the NPC price.{hint}",
+        self.ask("Item price", f"What is one {name} worth to you? e.g. 2500, 13k or 1.55m - empty for the NPC price.{hint}",
                  ok, initial="" if e.get("price") is None else str(e["price"]), ok_text="SAVE")
 
     def toggle_item(self, name):
         e = self.prices.entry(name)
         self.prices.set_include(name, not e.get("include", True))
         self.logs_version += 1
+        self.render(time.time())
+
+    def set_value(self, key, value, save=True):
+        """A setting that isn't on/off (EXP display, underlay style and opacity)."""
+        self.cfg[key] = value
+        if save:
+            save_json(CONFIG_PATH, self.cfg)
         self.render(time.time())
 
     def set_option(self, key, on):
@@ -3242,6 +4209,10 @@ class App:
                         user32.SetWindowDisplayAffinity(w.hwnd, 0x11 if on else 0)
                     except Exception:
                         pass
+            try:
+                user32.SetWindowDisplayAffinity(self.overlay.uhwnd, 0x11 if on else 0)
+            except Exception:
+                pass
         self.render(time.time())
 
     # --- potions
@@ -3286,11 +4257,10 @@ class App:
         p = self.profile["potions"][i]
 
         def ok(text):
-            try:
-                v = int((text or "").replace(",", "").replace("mesos", "").strip())
-            except ValueError:
-                return "Type a number, like 80."
-            if v < 0 or v > 100_000_000:
+            v = parse_mesos(text)
+            if v is None:
+                return "Type a price like 80, 1.5k or 2m."
+            if v > 100_000_000:
                 return "That price doesn't look right."
             p["price"] = v
             self._potions_changed()
@@ -3413,7 +4383,7 @@ class App:
         self.quit = True
         self.save_state()
         save_json(CONFIG_PATH, self.cfg)
-        for w in (self.prompt, self.catalog, self.controls):
+        for w in (self.prompt, self.catalog, self.map_win, self.controls):
             if w is not None:
                 w.close()
         if self._hk_thread_id:
@@ -3470,12 +4440,76 @@ class App:
             if self.cfg["debug"]:
                 log(f"mesos +{amt:,}" + ("" if self.session.running else " (not running: not counted)"))
 
+    def current_map(self):
+        """The map you're on, from NiaDB's map list - matched by the name in the MAP box."""
+        name = self.session.map.strip().lower()
+        if not name or not self.maps:
+            return None
+        hits = [m for m in self.maps if m["name"].strip().lower() == name]
+        if self.map_id:
+            hits = [m for m in hits if m["id"] == self.map_id] or hits
+        return hits[0] if hits else None
+
+    def import_pages(self):
+        """Read pages saved in meowdb_import/ into the cache (and NPC prices into the price book)."""
+        n = 0
+        self.icon_ids = getattr(self, "icon_ids", None) or icon_ids()
+        for kind, oid, name, info in import_saved_pages():
+            n += 1
+            if kind == "item-db" and info.get("name") and info.get("npc") is not None:
+                self.prices.entry(info["name"])["npc"] = info["npc"]
+        if n:
+            self.prices.save()
+            self.icon_ids = icon_ids()
+        return n
+
+    def open_map_info(self):
+        m = self.current_map()
+        if m is None:
+            return
+        if self.map_win is not None and not self.map_win.closed:
+            self.map_win.close()
+        self.map_win = MapInfoWindow(self, m)
+
+    def likely_items(self):
+        """Names of items you're likely to pick up: what the current map's monsters drop (from the
+        cached NiaDB pages), your potions and what you've looted before."""
+        m = self.current_map()
+        key = (m["id"] if m else None, len(self.prices.items))
+        if getattr(self, "_likely_key", None) == key:
+            return self._likely
+        names = {p["name"] for p in self.profile.get("potions", [])} | set(self.prices.items)
+        names |= {n for _, n, *_ in CATALOG}
+        if m:
+            for mob in load_json(MeowDB._path(f"map_{m['id']}"), []) or []:
+                for dr in load_json(MeowDB._path(f"mob_{mob['id']}"), []) or []:
+                    if isinstance(dr, dict) and dr.get("name"):
+                        names.add(dr["name"])
+        self._likely_key, self._likely = key, names
+        return names
+
     def canon_item(self, raw):
         """The real name of an item read off the screen; None for OCR junk (when the item list is
-        known, a name that matches nothing in it isn't counted)."""
+        known, a name that matches nothing in it isn't counted). A rare item that only looks like
+        the read beats nothing it resembles: "Red Pao" (an overall) next to "Red Potion" on a map
+        whose monsters drop Red Potions is a Red Potion."""
+        import difflib
         name = self.names.canon(raw)
         if self.names.names and name not in self.names.lower.values():
-            return None
+            name = None
+        likely = self.likely_items()
+        if name in likely:
+            return name
+        base = raw[:-3].strip() if raw.endswith("...") else raw
+        bl = base.lower()
+        best, score = None, 0.0
+        for n in likely:
+            nl = n.lower()
+            r = difflib.SequenceMatcher(None, bl, nl[:len(bl)] if raw.endswith("...") else nl).ratio()
+            if r > score:
+                best, score = n, r
+        if best and score >= (0.7 if name else 0.8):
+            return best
         return name
 
     def loot_summary(self):
@@ -3588,11 +4622,22 @@ class App:
             # overlay
             "state": se.state, "map": se.map.strip(), "profile": self.profile["name"],
             "exp": fmt_int(se.exp), "exph": (fmt_short(er) + "/h") if er is not None else "-/h",
+            # the same as a share of this level's EXP bar
+            "exppct": f"{se.exp / need * 100:.2f}%" if need else "-%",
+            "pcth": f"{er / need * 100:.2f}%/h" if (er and need) else "-%/h",
+            "exp_display": self.cfg.get("exp_display", "exp"),
+            "under": (self.cfg.get("underlay", "off"), round(float(self.cfg.get("underlay_opacity", 0.55)), 2)),
             "pct": last[1] if last else None, "ttl": fmt_dur(ttl) if ttl is not None else None,
             "meso": fmt_int(se.meso), "mesoh": (fmt_short(mr) + "/h") if mr is not None else "-/h",
-            "mesox": f"{se.pickups} pickups  ·  {fmt_dur(se.active)}",
+            "elapsed": fmt_dur(se.active),
+            "hover_btn": getattr(self.overlay, "hover_btn", None),
             # tracker window
-            "c_exp_total": fmt_int(se.exp), "c_exp_rate": (fmt_int(er) + " /h") if er is not None else "-",
+            # (with "both", the card's last row already shows level % / hour)
+            "c_exp_total": (f"{se.exp / need * 100:.2f}%" if need else "-")
+                           if self.cfg.get("exp_display") == "pct" else fmt_int(se.exp),
+            "c_exp_rate": ((f"{er / need * 100:.2f}% /h" if need else "-")
+                           if self.cfg.get("exp_display") == "pct" else fmt_int(er) + " /h")
+                          if er is not None else "-",
             "c_exp_time": fmt_dur(se.exp_t),
             "c_exp_extra_label": "Next level in", "c_exp_extra": fmt_dur(ttl) if ttl is not None else "-",
             "c_exp_extra2_label": "Levels gained" if se.levels else "Level % / hour",
@@ -3613,10 +4658,11 @@ class App:
         n_items = sum(r["qty"] for r in loot_rows)
         s.update({
             "loot": ("+" if loot_v >= 0 else "") + fmt_int(loot_v), "looth": (fmt_short(lh) + "/h") if lh is not None else "-/h",
-            "lootx": f"{n_items} item{'s' if n_items != 1 else ''}" + (
-                f"  ·  {sum(1 for r in loot_rows if r['included'] and not r['unit'])} unpriced"
-                if any(r["included"] and not r["unit"] for r in loot_rows) else ""),
+            "lootx": "" if self.cfg.get("overlay_loot_open") else f"{n_items} item{'s' if n_items != 1 else ''}",
             "c_loot_total": fmt_int(loot_v), "c_loot_items": fmt_int(n_items),
+            "loot_open": bool(self.cfg.get("overlay_loot_open")),
+            "loot_grid": tuple((getattr(self, "icon_ids", {}).get(r["name"].lower()), r["name"], r["qty"])
+                               for r in sorted(loot_rows, key=lambda r: -r["qty"])),
             "on": dict(on), "pots_setup": bool(self.profile.get("potions")),
             "pots": [(p.get("id"), name, p["used"]) for name, p in se.pots.items() if p["used"]],
             "potcost": fmt_int(se.pot_cost), "poth": (fmt_short(pr) + "/h") if pr is not None else "-/h",
@@ -3651,12 +4697,12 @@ class App:
             return
         mono = time.monotonic()
         dt, self._mono = min(5.0, mono - self._mono), mono
-        while not self.hotkeys.empty():
-            name = self.hotkeys.get_nowait()
-            if name == "controls":
-                self.open_controls()
-            elif name == "toggle":
-                self.toggle()
+        if self.n % 5 == 0 and os.path.exists(OPEN_FLAG):
+            try:
+                os.remove(OPEN_FLAG)
+            except OSError:
+                pass
+            self.open_controls()
         hwnd = find_game_window()
         if hwnd:
             self._game_seen = mono
@@ -3702,7 +4748,7 @@ class App:
                 except Exception as ex:
                     log("scan error:", repr(ex))
         ours = {self.overlay.hwnd}
-        for w in (self.controls, self.prompt, self.catalog):
+        for w in (self.controls, self.prompt, self.catalog, self.map_win):
             if w is not None and not w.closed:
                 ours.add(w.hwnd)
         visible = not self.cfg["hide_when_game_not_focused"] or (bool(hwnd) and (fg == hwnd or fg in ours))
@@ -3766,6 +4812,14 @@ def main():
         bar = sys.argv[i + 1] if len(sys.argv) > i + 1 and sys.argv[i + 1] != "-" else None
         msgs = sys.argv[i + 2] if len(sys.argv) > i + 2 else None
         replay(bar, msgs)
+        return
+    # one MapleTracker at a time: starting it again just opens the running one's tracker window
+    ctypes.windll.kernel32.CreateMutexW(None, False, "MapleTracker.single-instance")
+    if ctypes.windll.kernel32.GetLastError() == 183:          # ERROR_ALREADY_EXISTS
+        try:
+            open(OPEN_FLAG, "w").close()
+        except OSError:
+            pass
         return
     cfg = load_config()
     save_json(CONFIG_PATH, cfg)

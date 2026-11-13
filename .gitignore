@@ -11,10 +11,12 @@ captures/
 
 # Downloaded on demand: NiaDB data and item icons (game art)
 meowdb_cache/
+meowdb_import/
 icons/
 
 # Python / scratch
 __pycache__/
 *.pyc
 *.tmp
+open_window.flag
 *.holdout.npz

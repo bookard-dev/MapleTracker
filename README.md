@@ -5,7 +5,7 @@ EXP, meso, loot, potion and profit tracker overlay for MapleStory Classic.
 <p align="center"><img src="docs/overlay.png" alt="The overlay over the game: map, EXP per hour with a level gauge, mesos, potions used, loot and profit"></p>
 
 **Start:** double-click `Start MapleTracker.bat`. It closes by itself when MapleStory closes.
-It only takes screenshots and is read-only: no memory reading, nothing injected, no input sent to the game.
+It only takes screenshots and is read-only: no memory reading, nothing injected, no input sent to the game, and no keyboard hooks or hotkeys.
 
 ## At a glance
 
@@ -23,13 +23,15 @@ It only takes screenshots and is read-only: no memory reading, nothing injected,
 | | |
 |---|---|
 | **Overlay** | Game-style outlined text straight over the game (transparent background). It shows the session state and map, EXP gained [EXP/h], an EXP-bar gauge with level % and time to level up, mesos gained [mesos/h], and pickups |
-| **Alt+F6** / right-click the overlay | The tracker window, drawn like a game window. Drag it by its title strip; Esc or X closes it |
-| **Alt+F7** | Start / pause / resume, from inside the game |
+| The overlay's buttons (top right) | **Gear:** the tracker window, drawn like a game window (drag it by its title strip; Esc or X closes it). **Play / pause:** start, pause and resume. **Stop:** stop and save the session |
+| Right-click the overlay, or start MapleTracker again | Also opens the tracker window |
+| Click **LOOT** on the overlay | Open or close the loot grid: the icon and count of everything you've picked up this session, most first |
+| **SETTINGS > OVERLAY** | Show EXP as EXP/h, level %/h or both, and put a light or dark rounded background behind the overlay (opacity slider) so it reads over bright or dark maps |
 | Drag the overlay's text | Move it (the position is remembered). Size: `overlay_scale` / `window_scale` in `tracker_config.json` |
 
 ## Sessions, logs and characters
 
-- **MapleTracker starts stopped.** Nothing counts until you press **START** (or Alt+F7), so walking around town doesn't count.
+- **MapleTracker starts stopped.** Nothing counts until you press **START** (or the overlay's play button), so walking around town doesn't count.
 - **PAUSE** freezes both the numbers and the clock. EXP you gain while paused is never counted, even after you resume.
 - **STOP & SAVE** ends the session. Type a name in the **MAP** box (for example `Kerning Subway <Line 1>`) and the session is saved to the **LOG** tab:
   - when you press STOP & SAVE,
@@ -59,7 +61,7 @@ It only takes screenshots and is read-only: no memory reading, nothing injected,
 
 ## Loot and prices
 
-- **Pickups** ("Gold Ore x1 earned. (Etc)") are read from the same messages as mesos. Names the OCR garbles or the game cuts short ("Animal Fur Bun...") are matched to the real item names, and junk that matches no item is ignored.
+- **Pickups** ("Gold Ore x1 earned. (Etc)") are read from the same messages as mesos. Each message is followed line by line as the stack scrolls up, so every pickup counts exactly once, even when several arrive together or the same item drops twice in a row. Names the OCR garbles or the game cuts short ("Animal Fur Bun...") are matched to the real item names, and junk that matches no item is ignored.
 - **LOOT tab:** this session's pickups first, then everything in your price book (search with FIND).
   - **Click a price** to set what an item is worth to you: `2500`, `25k` or `1.5m`, or leave it empty for the NPC sell-back price. Scrolls default to 1 meso.
   - **Untick** an item to leave it out of PROFIT. You can also switch whole kinds off in SETTINGS.
@@ -69,6 +71,8 @@ It only takes screenshots and is read-only: no memory reading, nothing injected,
 ## Choosing the map
 
 Type in the **MAP** box and a list of matching maps drops down (towns left out, your recent maps first): Up/Down and Enter, or click. Anything you type still works as a map name.
+
+**MOBS** next to the map box shows the map's monsters and what they drop, from NiaDB's community **Drops (MS Classic)** lists. Each drop shows its player votes (more = more players saw it drop in Classic), what it's worth to you, and a box to leave it out of PROFIT. Quest items are left out.
 
 ## NiaDB data
 
