@@ -50,7 +50,9 @@ The overlay appears over the game. Press **â–¶** to start a session, and the **â
 
 - MapleTracker **starts stopped**, so walking around town doesn't count. Press â–¶ when you start hunting.
 - **Pause** freezes everything, the clock included.
-- Type your map's name in the **MAP** box. The session is then saved to your **Log** when you press stop, every hour, and when the game closes.
+- The **MAP** box fills itself in from your minimap while no session is running, so you never type it. Once you press â–¶ it stays put: a trip to town for potions doesn't move your hour at Monkey Forest II.
+- The session is saved to your **Log** when you press stop, every hour, and when the game closes.
+- Turn on **Pause on portal** in Settings and it pauses by itself whenever you change maps.
 
 ### Loot and profit
 
@@ -66,8 +68,8 @@ The overlay appears over the game. Press **â–¶** to start a session, and the **â
 
 ### Maps and drops
 
-- Start typing in the **MAP** box and pick your map from the list.
-- **MOBS** shows the map's monsters and what they drop in MS Classic, ranked by player votes, with each item's price.
+- The **MAP** box follows your minimap (keep the minimap at the top left, where the game puts it). You can also type a few letters and pick a map from the list.
+- **MOBS** shows the map's monsters and what they drop in MS Classic (player votes from NiaDB, or the drop rate players saw on the MapleClassic Wiki), with each item's price.
 
 <p align="center"><img src="docs/mobs.png" alt="The MOBS window: a map's monsters and what each drops in MS Classic, with player votes, prices and PROFIT checkboxes"></p>
 
@@ -78,10 +80,11 @@ The overlay appears over the game. Press **â–¶** to start a session, and the **â
 
 ## Tips
 
-- **Keep it clear of the status bar, your quick slots and the bottom-right messages.** MapleTracker reads those, and the overlay shows a red warning if it's covering one.
+- **Keep it clear of the status bar, your quick slots, the bottom-right messages and the minimap's title.** MapleTracker reads those, and the overlay shows a red warning if it's covering one.
 - **Recording or streaming?** "Hide from screenshots" in Settings lets the overlay sit anywhere, but it then won't show up in OBS or Discord either.
 - **Nothing being read?** Windows' text reader needs an English language pack: Settings > Time & language > Language.
 - **Lost the tracker window?** Right-click the overlay, or start MapleTracker again.
+- **Updated MapleTracker or its data?** RESTART on the Tracker tab saves your session and starts it again with the changes.
 
 <details>
 <summary><b>Technical details</b></summary>
@@ -97,7 +100,7 @@ The overlay appears over the game. Press **â–¶** to start a session, and the **â
 
 Map names, item names, icons, NPC prices and monster drops come from [NiaDB](https://meowdb.com). Looked-up data is kept in `meowdb_cache/`. Online lookups are off by default (`"niadb_online"` in `tracker_config.json`); when on, MapleTracker asks for at most one page every 10 seconds and stops if NiaDB refuses. Pages saved from meowdb.com with Ctrl+S into `meowdb_import/` are imported too.
 
-NPC sell prices, and the monsters on a map, can be filled in from the [MapleClassic Wiki](https://mapleclassic.wiki) with `python tools/fetch_prices.py` (add `--map "The Murky Swamp II"` for a map). It's run by hand, looks up only what's missing, and asks for 50 pages at a time, a few seconds apart. A price from a saved NiaDB item page always wins.
+NPC sell prices, the monsters on each map and what they drop come from the [MapleClassic Wiki](https://mapleclassic.wiki) through `python tools/fetch_prices.py` (`--all` for every map, monster and item, `--drops` for monster drops only, `--map "The Murky Swamp II"` for one map). It's run by hand, looks up only what's missing, and asks for 50 pages at a time, a few seconds apart. A saved NiaDB page always wins: its price over the wiki's, and its monster drops (with votes) over the wiki's list.
 
 ### Files and settings
 
@@ -111,7 +114,7 @@ NPC sell prices, and the monsters on a map, can be filled in from the [MapleClas
 ## Credits
 
 - Map, monster and drop data: [NiaDB](https://meowdb.com), used with permission.
-- NPC sell prices and map monsters: [MapleClassic Wiki](https://mapleclassic.wiki), under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). Data taken from the wiki keeps that license, and each item records the wiki page it came from.
+- NPC sell prices, map monsters and drops: [MapleClassic Wiki](https://mapleclassic.wiki), under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). Data taken from the wiki keeps that license, and each item records the wiki page it came from.
 - MapleStory is a trademark of NEXON. MapleTracker is a fan-made tool and isn't affiliated with NEXON or NiaDB.
 
 ## License

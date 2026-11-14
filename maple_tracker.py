@@ -51,6 +51,7 @@ DEFAULTS = {
     "hide_when_game_not_focused": True,
     "close_with_game": True,        # quit when MapleStory closes (after close_after_s seconds)
     "pause_on_portal": False,       # pause the session when the screen fades out for a map change
+    "map_from_minimap": True,       # fill in the MAP box from the minimap while no session runs
     "close_after_s": 10,
     "debug": False,                 # print every reading / message to the console
     "hide_from_screenshots": False, # True: leave our windows out of ALL screen capture (yours too:
@@ -87,6 +88,7 @@ DEFAULTS = {
     "msg_area": {"width": 270, "top": 252, "bottom": 140},
     "item_area_width": 340,         # item names run longer: read them from a wider strip
     "msg_line_h": 13.9,             # distance between two message lines
+    "msg_bottom_line": 162,         # where the newest message's text starts, above the game's bottom
 }
 
 user32 = ctypes.windll.user32
@@ -714,6 +716,7 @@ class ItemFeed(MessageReader):
     def __init__(self, ocr, canon=None):
         super().__init__(ocr, canon)
         self.y0 = None              # where the bottom line sits (px, in the strip)
+        self.top_units = DEFAULTS["msg_area"]["top"]     # the strip's top, above the game's bottom
         self.slots = {}             # slot -> record {"votes", "qty", "cat", "counted", "seen", "sig"}
 
     SMALL_S = 1.6       # below this UI scale the text is small: read it a second way too
@@ -780,12 +783,18 @@ class ItemFeed(MessageReader):
         lh = DEFAULTS["msg_line_h"] * s
         lines, d, any_text = self.read_lines(bgr, s)
         out = []
-        if lines:
-            bottom = lines[-1][0]
-            if self.y0 is None or bottom > self.y0 + 0.5 * lh:
-                self.y0 = bottom
-            elif abs(bottom - self.y0) < 0.5 * lh:
-                self.y0 = 0.9 * self.y0 + 0.1 * bottom
+        # The newest message always sits at the same place (measured at 1280x720 and 2560x1440,
+        # solo and in a party), so the bottom line is pinned there rather than guessed from the
+        # lowest text seen: a name tag or a pet passing through used to drag the guess off by
+        # part of a line, and every message after that fell between two lines and was skipped
+        # until it lined up again (missed pickups for minutes at a time). The yellow party bonus
+        # lines aren't read; they just leave an empty line.
+        anchor = (self.top_units - DEFAULTS["msg_bottom_line"]) * s
+        if self.y0 is None or abs(self.y0 - anchor) > 0.3 * lh:
+            self.y0 = anchor
+        near = [y for y, text in lines if abs(y - anchor) < 0.3 * lh and self._sig(text)[0] is not None]
+        if near:
+            self.y0 = 0.9 * self.y0 + 0.1 * max(near)        # fine-tune within a third of a line
         cur = {}
         for y, text in lines:
             pos = (self.y0 - y) / lh
@@ -886,14 +895,37 @@ def slot_name(slot):
 _ICONS = {}
 
 
+_SCROLL_TIERS = {"at": 0.0, "tier": {}, "icon": {}}
+
+
+def scroll_tier_icon(item_id):
+    """Every scroll of a tier has the same picture (Lesser: blue with yellow trim, Intermediate:
+    orange-red, Greater: yellow), so a scroll with no icon of its own borrows its tier's: the path of
+    another same-tier scroll's icon, or None if it isn't a scroll or no icon of its tier is saved."""
+    st = _SCROLL_TIERS
+    if int(item_id) not in st["tier"] and time.time() - st["at"] > 30:     # new pages may have come in
+        st["at"], st["tier"], st["icon"] = time.time(), {}, {}
+        for name, iid in icon_ids().items():
+            m = re.search(r"scroll: (lesser|intermediate|greater)$", name)
+            if m:
+                st["tier"][int(iid)] = m.group(1)
+                path = os.path.join(ICON_DIR, f"{int(iid)}.png")
+                if os.path.exists(path):
+                    st["icon"].setdefault(m.group(1), path)
+    return st["icon"].get(st["tier"].get(int(item_id)))
+
+
 def item_icon(item_id):
-    """The item's icon (RGBA), from icons/ or downloaded from MeowDB once; None if unavailable."""
+    """The item's icon (RGBA), from icons/ or downloaded from MeowDB once (a scroll without one uses
+    its tier's); None if unavailable."""
     if not item_id:
         return None
     if item_id in _ICONS:
         return _ICONS[item_id]
     path = os.path.join(ICON_DIR, f"{int(item_id)}.png")
     img = None
+    if not os.path.exists(path):
+        path = scroll_tier_icon(item_id) or path
     if not os.path.exists(path) and not ICONS_ONLINE:
         return None                       # not saved, and not allowed to fetch it: no icon
     try:
@@ -941,6 +973,41 @@ def blank_quickslots(img, left, top, rect, s, cfg):
     if bx1 > 0 and by1 > 0 and bx0 < w and by0 < h:
         img[max(0, by0):min(h, by1), max(0, bx0):min(w, bx1)] = 0
     return img
+
+
+MINIMAP_BOX = (320, 90)     # the minimap's title, in game units from the game's top left corner
+
+
+def read_minimap(img, s, ocr, maps):
+    """The map named in the minimap's title ("Warning Street" / "The Road to the Dungeon") from a
+    screenshot of the game's top left corner, or None. The title is white with a dark outline, so
+    only near-white pixels are kept, enlarged to about 2x the 768-high size for the OCR. A line
+    must be close to a real map name; the street on the line above settles maps with the same
+    name ("Mushroom Town")."""
+    import difflib
+    if ocr is None or ocr.engine is None or not maps:
+        return None
+    c = img.astype(np.int16)
+    white = (c.sum(axis=2) // 3 > 200) & (c.max(axis=2) - c.min(axis=2) < 50)
+    g = np.where(white, 0, 255).astype(np.uint8)
+    up = max(1.0, 2.0 / s)
+    if up > 1.0:
+        g = cv2.resize(g, None, fx=up, fy=up, interpolation=cv2.INTER_CUBIC)
+    g = cv2.copyMakeBorder(g, 16, 16, 16, 16, cv2.BORDER_CONSTANT, value=255)
+    lines = [ln[0].strip() for ln in ocr.lines(g) if len(ln[0].strip()) >= 4]
+    best, best_score = None, 0.0
+    for i, line in enumerate(lines):
+        low = line.lower()
+        above = lines[i - 1].lower() if i else ""
+        for m in maps:
+            r = difflib.SequenceMatcher(None, low, m["name"].lower()).ratio()
+            if r < 0.8:
+                continue
+            street = difflib.SequenceMatcher(None, above, (m.get("street") or "").lower()).ratio() if above else 0
+            score = r + (0.2 if street >= 0.7 else 0.0)
+            if score > best_score:
+                best, best_score = m, score
+    return best if best is not None and best_score >= 0.85 else None
 
 
 class PortalWatch:
@@ -1627,12 +1694,14 @@ class ItemNames:
 
 class PriceBook:
     """What each item is worth to you, shared by all characters (prices.json): your own price if
-    you set one, else the NPC sell-back price when known (from NiaDB), else 0 - scrolls default
-    to 1 meso. Each item can also be left out of PROFIT."""
+    you set one, else the NPC sell-back price when known (a saved NiaDB item page, else the
+    MapleClassic Wiki's list from tools/fetch_prices.py --all), else 0 - scrolls default to 1
+    meso. Each item can also be left out of PROFIT."""
 
     def __init__(self, path=PRICES_PATH):
         self.path = path
         self.items = load_json(path, {})
+        self.wiki = (load_json(os.path.join(MEOW_DIR, "wiki_prices.json"), {}) or {}).get("prices", {})
 
     def save(self):
         try:
@@ -1661,6 +1730,8 @@ class PriceBook:
             return e["price"], "you"
         if e.get("npc") is not None:
             return e["npc"], "NPC"
+        if name in self.wiki:
+            return self.wiki[name], "NPC"
         if loot_kind(name, e.get("cat")) == "scroll":
             return 1, "default"
         return 0, None
@@ -2947,7 +3018,8 @@ class MapInfoWindow(MapleWindow):
     def _got_drops(self, mob_id, drops):
         self.mob_drops[mob_id] = drops
         for dr in drops or []:
-            self.app.meow.item(dr["page"], lambda info, pg=dr["page"]: self._got_item(pg, info))
+            if dr.get("page"):          # drops from the wiki may have no NiaDB item page
+                self.app.meow.item(dr["page"], lambda info, pg=dr["page"]: self._got_item(pg, info))
         self._soon()
 
     def _got_item(self, page, info):
@@ -3003,8 +3075,8 @@ class MapInfoWindow(MapleWindow):
             if mob["id"] in self.expanded:
                 drops = self.mob_drops.get(mob["id"])
                 if drops is None:
-                    rows.append(("note", "Drops not saved yet: open this monster on meowdb.com, Ctrl+S into "
-                                         "meowdb_import, then RELOAD."))
+                    rows.append(("note", "Drops not saved yet: run tools/fetch_prices.py --drops, or save "
+                                         "its meowdb.com page into meowdb_import, then RELOAD."))
                     continue
                 quests = 0
                 for dr in drops:
@@ -3041,7 +3113,9 @@ class MapInfoWindow(MapleWindow):
                         stroke_width=st, stroke_fill=(20, 36, 84))
                 drops = self.mob_drops.get(data["id"])
                 info = (f"{data['count']} here  ·  " if data.get("count") else "") + (
-                    (f"{len(drops)} drops" + ("" if drops and "up" in drops[0] else " (reference)"))
+                    (f"{len(drops)} drops" + ("" if drops and "up" in drops[0] else
+                                              " (wiki)" if drops and "Wiki" in drops[0].get("source", "")
+                                              else " (reference)"))
                     if drops is not None else "drops not saved")
                 ld.text((vw - u(7), y + h / 2 + u(3)), info, font=font("bold", u(7.8)), fill=WHITE, anchor="rs",
                         stroke_width=st, stroke_fill=(20, 36, 84))
@@ -3377,6 +3451,8 @@ class TrackerWindow(MapleWindow):
         by0, by1 = u(232), u(252)
         self.button(img, "reset_both", (u(12), by0, u(130), by1), BTN_ORANGE, "RESET ALL",
                     lambda: app.reset("all"))
+        self.button(img, "restart", (W - u(12) - u(176), by0, W - u(12) - u(92), by1), BTN_BLUE, "RESTART",
+                    lambda: app.shutdown("restart"))
         self.button(img, "quit", (W - u(12) - u(84), by0, W - u(12), by1), BTN_RED, "QUIT",
                     lambda: app.shutdown("quit"))
 
@@ -3390,7 +3466,7 @@ class TrackerWindow(MapleWindow):
                json.dumps({k: app.cfg.get(k) for k in ("trackers", "profit", "exp_display", "underlay",
                                                        "underlay_opacity", "auto_profile",
                                                        "close_with_game", "hide_from_screenshots",
-                                                       "pause_on_portal")}, sort_keys=True))
+                                                       "pause_on_portal", "map_from_minimap")}, sort_keys=True))
         cache = getattr(self, "_set_cache", None)
         if cache is None or cache[0] != key:
             layer = Image.new("RGBA", (W, u(560)), (0, 0, 0, 0))
@@ -3509,9 +3585,10 @@ class TrackerWindow(MapleWindow):
         y += u(16) + u(5) + u(7)
 
         # SESSION: what happens on its own
-        y = panel("SESSION", y, u(3 * 18 - 2))
+        y = panel("SESSION", y, u(4 * 18 - 2))
         wide = x1 - x0 - u(12)
         for name, key, title, note in (
+                ("o_minimap", "map_from_minimap", "Read the map from the minimap", "while no session is running"),
                 ("o_portal", "pause_on_portal", "Pause on portal", "when you change maps"),
                 ("o_auto", "auto_profile", "Switch character automatically", "from the name on your status bar"),
                 ("o_close", "close_with_game", "Close with the game", "and save the session")):
@@ -3847,7 +3924,7 @@ class TrackerWindow(MapleWindow):
                 t0, t1 = time.localtime(e["start"]), time.localtime(e["end"])
                 when = time.strftime("%b %d  %H:%M", t0) + " - " + time.strftime("%H:%M", t1)
                 why = {"stopped": "stopped", "1 hour": "hourly save", "game closed": "game closed",
-                       "quit": "quit", "interrupted": "interrupted", "character switched": "switched character"
+                       "quit": "quit", "restart": "restarted", "interrupted": "interrupted", "character switched": "switched character"
                        }.get(e["reason"], e["reason"])
                 line1 = f"{when}   ·   {fmt_dur(e['active_s'])}   ·   {why}"
                 ld.text((u(18), y + u(13)), line1, font=font("bold", u(8.2)), fill=INK, anchor="ls")
@@ -4027,6 +4104,7 @@ class App:
         self.icon_ids = icon_ids()                   # item name -> icon, from what's cached
         self.names = ItemNames()                     # real item names (NiaDB's list, cached)
         self.items = ItemFeed(self.ocr, canon=self.canon_item)   # item pickups (a wider strip)
+        self.items.top_units = cfg["msg_area"]["top"]
         self.prices = PriceBook()
         self.meow = MeowDB(self, online=bool(self.cfg.get("niadb_online")))
         global ICONS_ONLINE
@@ -4049,6 +4127,7 @@ class App:
         self._name_cand, self._name_n = None, 0
         self.sct = mss.MSS() if hasattr(mss, "MSS") else mss.mss()
         self.portal = PortalWatch(cfg)
+        self._minimap = None            # the map read from the minimap last time (id)
         self.root = tk.Tk()
         self.root.withdraw()
         self.overlay = Overlay(self)
@@ -4499,8 +4578,11 @@ class App:
             self.regions.pop("your potion slots", None)
 
     def shutdown(self, reason="quit"):
+        """Save and close. "restart" then starts MapleTracker again (see main), loading any changes
+        to its code and data."""
         if self.quit:
             return
+        self.restart = reason == "restart"
         self.stop(reason)
         self.quit = True
         self.save_state()
@@ -4560,6 +4642,27 @@ class App:
             self.session.add_meso(amt)
             if self.cfg["debug"]:
                 log(f"mesos +{amt:,}" + ("" if self.session.running else " (not running: not counted)"))
+
+    def scan_minimap(self, rect, s):
+        """While no session is running, put the map named on the minimap in the MAP box (read the
+        same twice in a row first). A running or paused session keeps its map: going to town for
+        potions mustn't move an hour at Monkey Forest II to Henesys."""
+        cx, cy, cw, ch = rect
+        w, h = min(cw, int(MINIMAP_BOX[0] * s)), min(ch, int(MINIMAP_BOX[1] * s))
+        self.regions["the minimap's map name"] = (cx, cy, cx + w, cy + h)
+        m = read_minimap(self._grab(cx, cy, w, h), s, self.ocr, self.maps)
+        if m is None or m["id"] != self._minimap:
+            self._minimap = m["id"] if m else None
+            return
+        se = self.session
+        if se.state != STOPPED or (se.map.strip().lower() == m["name"].lower() and self.map_id == m["id"]):
+            return
+        self.set_map(m["name"])
+        self.map_id = m["id"]
+        if self.controls is not None and not self.controls.closed:
+            self.controls.set_map_text(m["name"])
+        log(f"map: {m['name']} (from the minimap)")
+        self.after_change()
 
     def current_map(self):
         """The map you're on, from NiaDB's map list - matched by the name in the MAP box."""
@@ -4872,6 +4975,10 @@ class App:
                         self.scan_potions(rect, s, mono)
                     if self.cfg.get("auto_profile") and self.n % 14 == 7:
                         self.scan_name(rect, s)
+                    if self.cfg.get("map_from_minimap") and se.state == STOPPED and self.n % 21 == 10:
+                        self.scan_minimap(rect, s)
+                    elif not self.cfg.get("map_from_minimap") or se.state != STOPPED:
+                        self.regions.pop("the minimap's map name", None)
                 except Exception as ex:
                     log("scan error:", repr(ex))
         ours = {self.overlay.hwnd}
@@ -4941,7 +5048,7 @@ def main():
         replay(bar, msgs)
         return
     # one MapleTracker at a time: starting it again just opens the running one's tracker window
-    ctypes.windll.kernel32.CreateMutexW(None, False, "MapleTracker.single-instance")
+    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "MapleTracker.single-instance")
     if ctypes.windll.kernel32.GetLastError() == 183:          # ERROR_ALREADY_EXISTS
         try:
             open(OPEN_FLAG, "w").close()
@@ -4957,7 +5064,19 @@ def main():
     except OSError:
         pass
     log("MapleTracker started")
-    App(cfg).run()
+    app = App(cfg)
+    app.run()
+    if getattr(app, "restart", False):
+        # RESTART: let go of the one-at-a-time lock, then start a fresh copy the way the .bat does
+        import subprocess
+        ctypes.windll.kernel32.CloseHandle(mutex)
+        try:
+            err = open(os.path.join(HERE, "tracker_errors.txt"), "w")
+        except OSError:
+            err = subprocess.DEVNULL
+        subprocess.Popen([sys.executable, "-u", os.path.abspath(__file__)] + sys.argv[1:], cwd=HERE,
+                         stdout=subprocess.DEVNULL, stderr=err, close_fds=True,
+                         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 
 if __name__ == "__main__":
