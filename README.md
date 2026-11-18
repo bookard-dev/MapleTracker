@@ -98,7 +98,7 @@ The overlay appears over the game. Press **â–¶** to start a session, and the **â
 
 ### Item and map data
 
-Map names, item names, icons, NPC prices and monster drops come from [NiaDB](https://meowdb.com). Looked-up data is kept in `meowdb_cache/`. Online lookups are off by default (`"niadb_online"` in `tracker_config.json`); when on, MapleTracker asks for at most one page every 10 seconds and stops if NiaDB refuses. Pages saved from meowdb.com with Ctrl+S into `meowdb_import/` are imported too.
+Map names, item names, icons, NPC prices and monster drops come from [NiaDB](https://meowdb.com). Looked-up data is kept in `meowdb_cache/`. A release comes with `starter_cache.zip` (built with `python tools/build_starter_cache.py`): on start, any map, monster, drop or price it has that isn't in `meowdb_cache/` yet is copied in, so the MOBS tab works out of the box; nothing already there is replaced. Online lookups are off by default (`"niadb_online"` in `tracker_config.json`); when on, MapleTracker asks for at most one page every 10 seconds and stops if NiaDB refuses. Pages saved from meowdb.com with Ctrl+S into `meowdb_import/` are imported too.
 
 NPC sell prices, the monsters on each map and what they drop come from the [MapleClassic Wiki](https://mapleclassic.wiki) through `python tools/fetch_prices.py` (`--all` for every map, monster and item, `--drops` for monster drops only, `--map "The Murky Swamp II"` for one map). It's run by hand, looks up only what's missing, and asks for 50 pages at a time, a few seconds apart. A saved NiaDB page always wins: its price over the wiki's, and its monster drops (with votes) over the wiki's list.
 

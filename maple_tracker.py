@@ -1494,6 +1494,35 @@ def import_saved_pages(folders=None):
     return done
 
 
+STARTER_CACHE = os.path.join(HERE, "starter_cache.zip")
+
+
+def seed_cache():
+    """Copy what starter_cache.zip (shipped with a release) has into meowdb_cache/, so a new install
+    already knows the maps, monsters, drops and prices. A file already there is never replaced."""
+    if not os.path.exists(STARTER_CACHE):
+        return 0
+    import zipfile
+    added = 0
+    try:
+        os.makedirs(MEOW_DIR, exist_ok=True)
+        with zipfile.ZipFile(STARTER_CACHE) as z:
+            for name in z.namelist():
+                if not re.fullmatch(r"[A-Za-z0-9_.-]+\.json", name):
+                    continue                  # only plain cache files, no folders or odd paths
+                dst = os.path.join(MEOW_DIR, name)
+                if os.path.exists(dst):
+                    continue
+                tmp = dst + ".tmp"
+                with open(tmp, "wb") as f:
+                    f.write(z.read(name))
+                os.replace(tmp, dst)
+                added += 1
+    except (OSError, zipfile.BadZipFile):
+        pass
+    return added
+
+
 def icon_ids():
     """{lower-case item name: icon / item id} from the potion list and everything cached (monster
     drop lists and item pages)."""
@@ -4101,6 +4130,7 @@ class App:
         self.pot_now = {}               # potion index -> count read right now (for the POTIONS tab)
         self.ocr = Ocr()
         self.msgs = MessageReader(self.ocr)          # mesos (a narrow strip reads best)
+        seed_cache()                                 # a new install: the data shipped with it
         self.icon_ids = icon_ids()                   # item name -> icon, from what's cached
         self.names = ItemNames()                     # real item names (NiaDB's list, cached)
         self.items = ItemFeed(self.ocr, canon=self.canon_item)   # item pickups (a wider strip)
