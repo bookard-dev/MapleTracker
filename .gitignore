@@ -12,6 +12,10 @@ captures/
 # What "Send Diagnostics.bat" saves (screenshots of someone's game)
 diagnostics/
 
+# Files replaced by an in-app update, and which version is installed
+update_backup/
+version.json
+
 # Downloaded on demand: NiaDB data and item icons (game art)
 meowdb_cache/
 meowdb_import/

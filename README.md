@@ -18,6 +18,8 @@
 1. Double-click **`First Time Setup.bat`** (once). It finds Python 3.10 or newer, offers to install Python 3.12 if you don't have it, and installs the packages MapleTracker needs (`requirements.txt`). If something breaks later, run it again to repair.
 2. Double-click **`Start MapleTracker.bat`**.
 
+To update later, open **⚙ → SETTINGS → UPDATES** and press **CHECK FOR UPDATES**, then **INSTALL UPDATE**. It downloads the newest version from this repository, keeps your settings and data, saves the replaced files in `update_backup/`, and restarts MapleTracker.
+
 Windows 10 or 11. Setting up by hand instead: install [Python](https://www.python.org/) 3.10 or newer, then `python -m pip install -r requirements.txt`.
 
 The overlay appears over the game. Press **▶** to start a session, and the **⚙** button opens the tracker window. MapleTracker closes by itself when you close MapleStory.

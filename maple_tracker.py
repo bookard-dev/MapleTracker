@@ -3503,14 +3503,14 @@ class TrackerWindow(MapleWindow):
         vy0, vy1 = u(43), H - u(24)            # inside the panel's border
         vh = vy1 - vy0
         app = self.app
-        key = (self.hover, self.sliding,
+        key = (self.hover, self.sliding, app.update_state, app.update_note,
                json.dumps({k: app.cfg.get(k) for k in ("trackers", "profit", "exp_display", "underlay",
                                                        "underlay_opacity", "auto_profile",
                                                        "close_with_game", "hide_from_screenshots",
                                                        "pause_on_portal", "map_from_minimap")}, sort_keys=True))
         cache = getattr(self, "_set_cache", None)
         if cache is None or cache[0] != key:
-            layer = Image.new("RGBA", (W, u(640)), (0, 0, 0, 0))
+            layer = Image.new("RGBA", (W, u(720)), (0, 0, 0, 0))
             before = {"b": set(self.buttons), "s": set(self.sliders)}
             total = self._settings_body(layer, u(3)) + u(4)
             made = {"b": {n: v for n, v in self.buttons.items() if n not in before["b"]},
@@ -3662,6 +3662,22 @@ class TrackerWindow(MapleWindow):
               (lambda: app.set_option("hide_from_screenshots", not app.cfg.get("hide_from_screenshots"))),
               "also hides it from OBS and Discord")
         y += u(16) + u(5) + u(7)
+
+        # UPDATES: the latest version from GitHub
+        y = panel("UPDATES", y, u(18 + 22))
+        ver = (load_json(VERSION_PATH, {}) or {}).get("sha")
+        note = app.update_note or ("Get the newest MapleTracker from GitHub. Your settings and data are kept."
+                                   + (f"  (you have {ver})" if ver else ""))
+        d.text((lx, y + u(9)), note, font=font("reg", u(7.6)),
+               fill=(196, 64, 40) if note.startswith("Couldn't") else DIM, anchor="ls")
+        y += u(15)
+        st = app.update_state
+        title = {"checking": "CHECKING...", "installing": "INSTALLING...",
+                 "ready": "INSTALL UPDATE"}.get(st, "CHECK FOR UPDATES")
+        self.button(img, "update", (x0 + u(8), y, x0 + u(140), y + u(18)),
+                    BTN_ORANGE if st == "ready" else BTN_BLUE, title, app.update_button,
+                    enabled=st in ("idle", "ready"))
+        y += u(18) + u(5) + u(7)
 
         # HELP: when something doesn't read
         y = panel("HELP", y, u(18 + 22))
@@ -4453,6 +4469,62 @@ class App:
             save_json(CONFIG_PATH, self.cfg)
         self.render(time.time())
 
+    # --- SETTINGS > UPDATES: check GitHub, then install and restart (on a thread: no freezing)
+    update_state, update_note, _update = "idle", "", None
+
+    def update_button(self):
+        if self.update_state == "ready":
+            self._update_job("installing", "Installing the update...", lambda: install_update(self._update))
+        elif self.update_state not in ("checking", "installing"):
+            self._update_job("checking", "Checking GitHub for a new version...", check_update)
+
+    def _update_job(self, state, note, work):
+        self.update_state, self.update_note = state, note
+        box = {}
+
+        def run():
+            try:
+                box["result"] = work()
+            except Exception as ex:
+                box["error"] = ex
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+
+        def wait():
+            if th.is_alive():
+                self.root.after(200, wait)
+                return
+            if "error" in box:
+                ex = box["error"]
+                self.update_state = "idle"
+                self.update_note = f"Couldn't update: {ex}" if isinstance(ex, RuntimeError) else \
+                    f"Couldn't reach GitHub ({type(ex).__name__}) - try again later."
+                log("update:", repr(ex))
+            elif state == "checking":
+                upd = box["result"]
+                if upd["changed"]:
+                    self._update, self.update_state = upd, "ready"
+                    n = len(upd["changed"])
+                    self.update_note = (f"New version{' ' + upd['sha'] if upd['sha'] else ''}: {n} file"
+                                        f"{'s' if n != 1 else ''} changed. Installing restarts MapleTracker.")
+                else:
+                    self.update_state, self.update_note = "idle", "You have the latest version."
+            else:
+                self.update_note = "Updated - restarting..."
+                self._redraw_controls()
+                self.root.after(600, lambda: self.shutdown("restart"))
+                return
+            self._redraw_controls()
+        self._redraw_controls()
+        self.root.after(200, wait)
+
+    def _redraw_controls(self):
+        if self.controls is not None and not self.controls.closed:
+            try:
+                self.controls.redraw()
+            except tk.TclError:
+                pass
+
     def run_diagnostics(self):
         """SETTINGS > RUN DIAGNOSTICS: the same as Send Diagnostics.bat, in a window of its own
         (it asks you to click on the game, then saves the zip and shows it in Explorer)."""
@@ -5104,6 +5176,102 @@ def replay(folder_bar, folder_msgs):
                 total += got
                 print(os.path.basename(f), "mesos", got)
         print("meso messages counted:", total, "sum", sum(total))
+
+
+# ----------------------------------------------------------------------------- updates from GitHub
+UPDATE_ZIP = "https://codeload.github.com/bookard-dev/MapleTracker/zip/refs/heads/main"
+UPDATE_API = "https://api.github.com/repos/bookard-dev/MapleTracker/commits/main"
+UPDATE_UA = "MapleTracker-updater"
+VERSION_PATH = os.path.join(HERE, "version.json")
+# never replaced by an update, even if the download had them: your own data
+UPDATE_KEEP = ("tracker_config.json", "tracker_state.json", "prices.json", "version.json", "profiles/",
+               "meowdb_cache/", "meowdb_import/", "icons/", "captures/", "diagnostics/", "update_backup/")
+TEXT_EXT = (".py", ".bat", ".txt", ".md", ".json", ".gitignore", ".gitattributes")
+
+
+def _norm(name, data):
+    """Text files compare without caring about line endings."""
+    return data.replace(b"\r\n", b"\n") if name.lower().endswith(TEXT_EXT) else data
+
+
+def check_update():
+    """Download the latest MapleTracker from GitHub and compare it with this copy, file by file.
+    -> {"files": {path: bytes}, "changed": [paths], "sha": "abc1234" or None, "msg": str}"""
+    import io
+    import urllib.request
+    import zipfile
+    if os.path.isdir(os.path.join(HERE, ".git")):
+        raise RuntimeError("this copy is a git checkout - update it with git pull")
+    req = urllib.request.Request(UPDATE_ZIP, headers={"User-Agent": UPDATE_UA})
+    data = urllib.request.urlopen(req, timeout=60).read()
+    files = {}
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        for info in z.infolist():
+            if info.is_dir() or "/" not in info.filename:
+                continue
+            rel = info.filename.split("/", 1)[1]
+            parts = rel.split("/")
+            if not rel or rel.startswith("/") or ".." in parts or ":" in rel:
+                continue                                  # only plain paths inside the folder
+            if any(rel == k or rel.startswith(k) for k in UPDATE_KEEP):
+                continue
+            body = z.read(info)
+            if rel.lower().endswith(".bat"):             # cmd wants CRLF batch files
+                body = body.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+            files[rel] = body
+    if "maple_tracker.py" not in files:
+        raise RuntimeError("the download doesn't look like MapleTracker")
+    changed = []
+    for rel, body in sorted(files.items()):
+        p = os.path.join(HERE, *rel.split("/"))
+        try:
+            with open(p, "rb") as f:
+                old = f.read()
+        except OSError:
+            old = None
+        if old is None or _norm(rel, old) != _norm(rel, body):
+            changed.append(rel)
+    sha, msg = None, ""
+    try:
+        req = urllib.request.Request(UPDATE_API, headers={"User-Agent": UPDATE_UA})
+        info = json.loads(urllib.request.urlopen(req, timeout=20).read().decode("utf-8"))
+        sha, msg = info["sha"][:7], info["commit"]["message"].splitlines()[0]
+    except Exception:
+        pass
+    return {"files": files, "changed": changed, "sha": sha, "msg": msg}
+
+
+def install_update(upd):
+    """Write the changed files (the old ones go to update_backup/<time>/ first), then install new
+    packages if requirements.txt changed."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = os.path.join(HERE, "update_backup", stamp)
+    for rel in upd["changed"]:
+        dst = os.path.join(HERE, *rel.split("/"))
+        if os.path.exists(dst):
+            b = os.path.join(backup, *rel.split("/"))
+            os.makedirs(os.path.dirname(b), exist_ok=True)
+            with open(dst, "rb") as a, open(b, "wb") as c:
+                c.write(a.read())
+    for rel in upd["changed"]:
+        dst = os.path.join(HERE, *rel.split("/"))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        tmp = dst + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(upd["files"][rel])
+        os.replace(tmp, dst)
+    save_json(VERSION_PATH, {"sha": upd.get("sha"), "installed": stamp})
+    log(f"updated to {upd.get('sha') or 'the latest version'}: {len(upd['changed'])} files "
+        f"(old ones in update_backup/{stamp})")
+    if "requirements.txt" in upd["changed"]:
+        exe = sys.executable
+        if os.path.basename(exe).lower() == "pythonw.exe":
+            exe = os.path.join(os.path.dirname(exe), "python.exe")
+        r = subprocess.run([exe, "-m", "pip", "install", "--disable-pip-version-check", "-r",
+                            os.path.join(HERE, "requirements.txt")], cwd=HERE, capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        log("packages updated" if r.returncode == 0 else
+            "updating packages failed - run First Time Setup.bat: " + r.stderr.decode("utf-8", "replace")[-300:])
 
 
 def diagnose():
