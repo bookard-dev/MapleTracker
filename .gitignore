@@ -9,6 +9,9 @@ prices.json
 # Screen recordings used to build the digit templates (they show other players' names and chat)
 captures/
 
+# What "Send Diagnostics.bat" saves (screenshots of someone's game)
+diagnostics/
+
 # Downloaded on demand: NiaDB data and item icons (game art)
 meowdb_cache/
 meowdb_import/

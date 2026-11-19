@@ -22,6 +22,8 @@ Windows 10 or 11. Setting up by hand instead: install [Python](https://www.pytho
 
 The overlay appears over the game. Press **▶** to start a session, and the **⚙** button opens the tracker window. MapleTracker closes by itself when you close MapleStory.
 
+If it can't read your EXP, map or pickups, run **`Send Diagnostics.bat`** while you're in a map and send the zip it makes. It holds a screenshot of the game window and what each reader saw (nothing is uploaded; you send it yourself).
+
 ## A quick tour
 
 | | |

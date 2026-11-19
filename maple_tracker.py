@@ -262,6 +262,10 @@ class ExpReader:
         """-> (exp, percent) or None if the strip doesn't read cleanly."""
         if self.tpl is None:
             return None
+        return self.parse(self.tokens(bgr, s))
+
+    def tokens(self, bgr, s):
+        """The strip as glyph tokens ("|17,816[88.13%[" when it reads cleanly)."""
         white, green = glyph_masks(bgr)
         m = white | green
         dh = self.DIGIT_H * s
@@ -285,7 +289,10 @@ class ExpReader:
                 continue
             ch, dist = self.classify(m[y0:y1, x0:x1])
             toks.append(ch if dist <= 0.17 else "?")
-        text = "".join(toks)
+        return "".join(toks)
+
+    @staticmethod
+    def parse(text):
         mt = re.search(r"\|?[.,]*([\d,]+)\[(\d{1,3})[.,](\d\d)%\[", text)   # "11.93%": a point, never a comma
         if not mt:
             return None
@@ -1508,9 +1515,13 @@ def seed_cache():
         os.makedirs(MEOW_DIR, exist_ok=True)
         with zipfile.ZipFile(STARTER_CACHE) as z:
             for name in z.namelist():
-                if not re.fullmatch(r"[A-Za-z0-9_.-]+\.json", name):
-                    continue                  # only plain cache files, no folders or odd paths
-                dst = os.path.join(MEOW_DIR, name)
+                if re.fullmatch(r"icons/\d{7}\.png", name):
+                    os.makedirs(ICON_DIR, exist_ok=True)
+                    dst = os.path.join(ICON_DIR, name[6:])
+                elif re.fullmatch(r"[A-Za-z0-9_.-]+\.json", name):
+                    dst = os.path.join(MEOW_DIR, name)
+                else:
+                    continue                  # only cache files and icons, no odd paths
                 if os.path.exists(dst):
                     continue
                 tmp = dst + ".tmp"
@@ -5070,7 +5081,135 @@ def replay(folder_bar, folder_msgs):
         print("meso messages counted:", total, "sum", sum(total))
 
 
+def diagnose():
+    """Save what MapleTracker sees of the game into one zip to send to the developer: window size
+    and scale, display scaling, OCR languages, what the EXP and minimap readers read (with the
+    crops they read from), a screenshot of the game and the logs. Only screenshots: nothing is
+    sent to the game, and nothing leaves this computer unless you send the zip yourself."""
+    import platform
+    import zipfile
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out = os.path.join(HERE, "diagnostics", stamp)
+    os.makedirs(out, exist_ok=True)
+    rep = []
+
+    def say(*a):
+        line = " ".join(str(x) for x in a)
+        rep.append(line)
+        print(line)
+
+    say("MapleTracker diagnostics", stamp)
+    say("Windows", platform.version(), "| Python", sys.version.split()[0], platform.architecture()[0])
+    for mod in ("mss", "numpy", "cv2", "PIL"):
+        try:
+            say(f"  {mod}", __import__(mod).__version__)
+        except Exception as ex:
+            say(f"  {mod} MISSING: {ex!r}")
+    cfg = load_config()
+    seed_cache()
+    maps = load_json(MeowDB._path("maps"), []) or []
+    say("maps known:", len(maps), "| EXP templates:", os.path.exists(GLYPHS_PATH),
+        "| icons:", len(os.listdir(ICON_DIR)) if os.path.isdir(ICON_DIR) else 0)
+    ocr = Ocr()
+    say("OCR:", ocr.error or f"ok ({ocr.engine.recognizer_language.language_tag})")
+    try:
+        from winrt.windows.media.ocr import OcrEngine
+        say("  OCR languages installed:", ", ".join(l.language_tag for l in OcrEngine.available_recognizer_languages) or "none")
+    except Exception as ex:
+        say("  OCR languages: can't list", repr(ex))
+
+    titles = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    def each(h, _):
+        n = user32.GetWindowTextLengthW(h)
+        if n and user32.IsWindowVisible(h):
+            b = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(h, b, n + 1)
+            if "maple" in b.value.lower():
+                titles.append(b.value)
+        return True
+    user32.EnumWindows(each, 0)
+    say("windows with 'maple' in the title:", titles or "none")
+
+    hwnd = find_game_window()
+    if not hwnd:
+        say("PROBLEM: no window titled exactly 'MapleStory' - start the game first.")
+    else:
+        print("\n  Click on the MapleStory window now (waiting up to 30 seconds)...")
+        t0 = time.time()
+        while user32.GetForegroundWindow() != hwnd and time.time() - t0 < 30:
+            time.sleep(0.2)
+        time.sleep(1.0)
+        front = user32.GetForegroundWindow() == hwnd
+        say("game in front:", front, "" if front else "(PROBLEM: other windows may cover what's read)")
+        rect = client_rect(hwnd)
+        s = ui_scale(rect, cfg)
+        try:
+            dpi = user32.GetDpiForWindow(hwnd)
+        except Exception:
+            dpi = None
+        say("game client area: x", rect[0], "y", rect[1], "size", f"{rect[2]}x{rect[3]}", "| UI scale", round(s, 3),
+            "| display DPI", dpi, f"({round(dpi / 96 * 100)}% scaling)" if dpi else "")
+        sct = mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+
+        def grab(x, y, w, h):
+            return np.ascontiguousarray(np.asarray(
+                sct.grab({"left": int(x), "top": int(y), "width": max(1, int(w)), "height": max(1, int(h))}))[:, :, :3])
+        cx, cy, cw, ch = rect
+        cv2.imwrite(os.path.join(out, "game.png"), grab(cx, cy, cw, ch))
+        # EXP
+        e = cfg["exp_text"]
+        mid = cx + cw / 2
+        x0, x1 = mid + e["dx0"] * s, mid + e["dx1"] * s
+        y0, y1 = cy + ch - e["dy0"] * s, cy + ch - e["dy1"] * s
+        strip = grab(x0, y0, x1 - x0, y1 - y0)
+        cv2.imwrite(os.path.join(out, "exp_strip.png"), cv2.resize(strip, None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST))
+        wide = grab(mid - 300 * s, cy + ch - 45 * s, 600 * s, 45 * s)
+        cv2.imwrite(os.path.join(out, "status_bar.png"), wide)
+        r = ExpReader()
+        if r.tpl is not None:
+            toks = r.tokens(strip, s)
+            say("EXP strip tokens:", repr(toks), "->", r.parse(toks) or "NOT READ")
+        # minimap
+        w, h = min(cw, int(MINIMAP_BOX[0] * s)), min(ch, int(MINIMAP_BOX[1] * s))
+        mm = grab(cx, cy, w, h)
+        cv2.imwrite(os.path.join(out, "minimap_title.png"), mm)
+        if ocr.engine is not None:
+            c = mm.astype(np.int16)
+            white = (c.sum(axis=2) // 3 > 200) & (c.max(axis=2) - c.min(axis=2) < 50)
+            g = np.where(white, 0, 255).astype(np.uint8)
+            up = max(1.0, 2.0 / s)
+            if up > 1.0:
+                g = cv2.resize(g, None, fx=up, fy=up, interpolation=cv2.INTER_CUBIC)
+            g = cv2.copyMakeBorder(g, 16, 16, 16, 16, cv2.BORDER_CONSTANT, value=255)
+            cv2.imwrite(os.path.join(out, "minimap_ocr_input.png"), g)
+            say("minimap OCR lines:", [ln[0] for ln in ocr.lines(g)])
+            m = read_minimap(mm, s, ocr, maps)
+            say("minimap map:", m["name"] if m else "NOT READ")
+    for f in ("tracker_log.txt", "tracker_errors.txt", "tracker_config.json"):
+        p = os.path.join(HERE, f)
+        if os.path.exists(p):
+            with open(p, "rb") as a, open(os.path.join(out, f), "wb") as b:
+                b.write(a.read())
+    with open(os.path.join(out, "report.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(rep) + "\n")
+    zpath = out + ".zip"
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(os.listdir(out)):
+            z.write(os.path.join(out, f), f)
+    print(f"\nSaved: {zpath}\nSend that zip to the MapleTracker developer. It includes a screenshot of"
+          " the game window (your character and chat may be visible).")
+    try:
+        subprocess.Popen(["explorer", "/select,", zpath])
+    except Exception:
+        pass
+
+
 def main():
+    if "--diagnose" in sys.argv:
+        diagnose()
+        return
     if "--replay" in sys.argv:
         i = sys.argv.index("--replay")
         bar = sys.argv[i + 1] if len(sys.argv) > i + 1 and sys.argv[i + 1] != "-" else None
