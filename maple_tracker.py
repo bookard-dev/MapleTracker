@@ -23,6 +23,7 @@ import json
 import os
 import queue
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -3509,7 +3510,7 @@ class TrackerWindow(MapleWindow):
                                                        "pause_on_portal", "map_from_minimap")}, sort_keys=True))
         cache = getattr(self, "_set_cache", None)
         if cache is None or cache[0] != key:
-            layer = Image.new("RGBA", (W, u(560)), (0, 0, 0, 0))
+            layer = Image.new("RGBA", (W, u(640)), (0, 0, 0, 0))
             before = {"b": set(self.buttons), "s": set(self.sliders)}
             total = self._settings_body(layer, u(3)) + u(4)
             made = {"b": {n: v for n, v in self.buttons.items() if n not in before["b"]},
@@ -3660,7 +3661,18 @@ class TrackerWindow(MapleWindow):
         check("o_hide", x0 + u(6), y, wide, "Hide from screenshots", app.cfg.get("hide_from_screenshots"),
               (lambda: app.set_option("hide_from_screenshots", not app.cfg.get("hide_from_screenshots"))),
               "also hides it from OBS and Discord")
-        return y + u(16) + u(5)
+        y += u(16) + u(5) + u(7)
+
+        # HELP: when something doesn't read
+        y = panel("HELP", y, u(18 + 22))
+        d.text((lx, y + u(9)), "EXP, map or pickups not read? Be in a map with the minimap showing, then:",
+               font=font("reg", u(7.6)), fill=DIM, anchor="ls")
+        y += u(15)
+        self.button(img, "run_diag", (x0 + u(8), y, x0 + u(140), y + u(18)), BTN_BLUE, "RUN DIAGNOSTICS",
+                    app.run_diagnostics)
+        d.text((x0 + u(148), y + u(12)), "saves a zip to send to the developer", font=font("reg", u(7.6)),
+               fill=DIM, anchor="ls")
+        return y + u(18) + u(5) + u(4)
 
     def draw_loot(self, img):
         """This session's pickups first, then everything else in your price book: price (click to
@@ -4441,6 +4453,19 @@ class App:
             save_json(CONFIG_PATH, self.cfg)
         self.render(time.time())
 
+    def run_diagnostics(self):
+        """SETTINGS > RUN DIAGNOSTICS: the same as Send Diagnostics.bat, in a window of its own
+        (it asks you to click on the game, then saves the zip and shows it in Explorer)."""
+        exe = sys.executable
+        if os.path.basename(exe).lower() == "pythonw.exe":
+            exe = os.path.join(os.path.dirname(exe), "python.exe")
+        try:
+            subprocess.Popen([exe, os.path.abspath(__file__), "--diagnose", "--pause"], cwd=HERE,
+                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+            log("diagnostics started")
+        except Exception as ex:
+            log(f"diagnostics couldn't start: {ex!r}")
+
     def set_option(self, key, on):
         self.cfg[key] = bool(on)
         save_json(CONFIG_PATH, self.cfg)
@@ -5204,11 +5229,20 @@ def diagnose():
         subprocess.Popen(["explorer", "/select,", zpath])
     except Exception:
         pass
+    if "--pause" in sys.argv:            # started from the tracker's SETTINGS: keep the window open
+        input("\nPress Enter to close this window.")
 
 
 def main():
     if "--diagnose" in sys.argv:
-        diagnose()
+        try:
+            diagnose()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            print("\nDiagnostics stopped with the error above - please send a screenshot of this window.")
+            if "--pause" in sys.argv:
+                input("\nPress Enter to close this window.")
         return
     if "--replay" in sys.argv:
         i = sys.argv.index("--replay")
